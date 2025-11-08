@@ -1,0 +1,640 @@
+#!/usr/bin/env python3
+"""
+Inkscape Quilt Motion Preview & Export extension.
+
+This script gathers the selected path elements from the active document,
+preserves their draw order, animates them in a GTK preview window, and
+exports the resulting stitch path to several long‑arm quilting formats.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import inkex
+from inkex import bezier, units
+from inkex.elements import PathElement
+from inkex.localization import inkex_gettext as _
+from inkex.paths import CubicSuperPath
+
+try:
+    import gi  # type: ignore
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import GLib, Gtk  # type: ignore
+
+    GTK_AVAILABLE = True
+except Exception:  # pragma: no cover - Gtk is only available inside Inkscape
+    GTK_AVAILABLE = False
+    GLib = None  # type: ignore
+    Gtk = None  # type: ignore
+
+
+Point = Tuple[float, float]
+
+
+@dataclass
+class MotionSegment:
+    """Represents a contiguous collection of points following the same stitch state."""
+
+    points: List[Point]
+    needle_down: bool = True
+
+
+@dataclass
+class MotionEdge:
+    """Single linear edge in the flattened stitch sequence."""
+
+    start_px: Point
+    end_px: Point
+    needle_down: bool
+    start_length_mm: float
+    length_mm: float
+
+    @property
+    def end_length_mm(self) -> float:
+        return self.start_length_mm + self.length_mm
+
+
+class MotionPathModel:
+    """Holds a stitched path flattened to monotonic, ordered geometry."""
+
+    def __init__(self, segments: List[MotionSegment], px_to_mm: float) -> None:
+        stitched = [seg for seg in segments if len(seg.points) >= 2]
+        self.segments = stitched
+        self.px_to_mm = px_to_mm
+        self.edges: List[MotionEdge] = []
+        self.total_length_mm = 0.0
+
+        for seg in stitched:
+            pts = seg.points
+            for i in range(1, len(pts)):
+                start = pts[i - 1]
+                end = pts[i]
+                delta = math.dist(start, end)
+                length_mm = delta * px_to_mm
+                edge = MotionEdge(
+                    start_px=start,
+                    end_px=end,
+                    needle_down=seg.needle_down,
+                    start_length_mm=self.total_length_mm,
+                    length_mm=length_mm,
+                )
+                self.edges.append(edge)
+                self.total_length_mm += length_mm
+
+        xs = [pt[0] for seg in stitched for pt in seg.points]
+        ys = [pt[1] for seg in stitched for pt in seg.points]
+        if xs and ys:
+            self.bounds = (min(xs), min(ys), max(xs), max(ys))
+        else:
+            self.bounds = (0.0, 0.0, 1.0, 1.0)
+
+    def iter_segments_mm(self) -> List[Tuple[bool, List[Point]]]:
+        """Return the motion path as mm‑based sequences preserving needle state."""
+        factor = self.px_to_mm
+        converted: List[Tuple[bool, List[Point]]] = []
+        for seg in self.segments:
+            converted.append(
+                (
+                    seg.needle_down,
+                    [(x * factor, y * factor) for x, y in seg.points],
+                )
+            )
+        return converted
+
+    def point_at(self, length_mm: float) -> Tuple[Point, bool]:
+        """Return the cartesian point and stitch state at a given cumulative length."""
+        if not self.edges:
+            return (0.0, 0.0), True
+        clamped = max(0.0, min(length_mm, self.total_length_mm))
+        for edge in self.edges:
+            if clamped <= edge.end_length_mm or math.isclose(
+                clamped, edge.end_length_mm, abs_tol=1e-6
+            ):
+                if edge.length_mm == 0:
+                    return edge.end_px, edge.needle_down
+                ratio = (clamped - edge.start_length_mm) / edge.length_mm
+                x = edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * ratio
+                y = edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * ratio
+                return (x, y), edge.needle_down
+        last_edge = self.edges[-1]
+        return last_edge.end_px, last_edge.needle_down
+
+
+def _flatten_path_element(
+    element: PathElement, tolerance: float = 0.5
+) -> List[MotionSegment]:
+    """Convert an Inkscape path element into flattened motion segments."""
+    transform = element.composed_transform()
+    path = element.path.transform(transform)
+    csp: CubicSuperPath = path.to_superpath()
+    bezier.cspsubdiv(csp, tolerance)
+
+    segments: List[MotionSegment] = []
+    previous_end: Optional[Point] = None
+    for subpath in csp:
+        points = [tuple(node[1]) for node in subpath]
+        if len(points) < 2:
+            continue
+        # Remove duplicate closing node
+        if math.isclose(points[0][0], points[-1][0], abs_tol=1e-9) and math.isclose(
+            points[0][1], points[-1][1], abs_tol=1e-9
+        ):
+            points = points[:-1]
+        if not points:
+            continue
+        if previous_end and (
+            not math.isclose(previous_end[0], points[0][0], abs_tol=1e-6)
+            or not math.isclose(previous_end[1], points[0][1], abs_tol=1e-6)
+        ):
+            segments.append(MotionSegment(points=[previous_end, points[0]], needle_down=False))
+        segments.append(MotionSegment(points=list(points), needle_down=True))
+        previous_end = points[-1]
+    return segments
+
+
+class ExportProfile:
+    """Holds metadata about every supported export format."""
+
+    def __init__(
+        self,
+        title: str,
+        extension: str,
+        description: str,
+        writer: Callable[[MotionPathModel, Path], None],
+    ) -> None:
+        self.title = title
+        self.extension = extension
+        self.description = description
+        self.writer = writer
+
+
+class QuiltPreviewWindow(Gtk.Window):  # type: ignore[misc]
+    """Interactive GTK window that previews and exports the motion path."""
+
+    BASE_SPEED_MM_PER_SEC = 35.0
+
+    def __init__(
+        self,
+        model: MotionPathModel,
+        exporters: Dict[str, ExportProfile],
+    ) -> None:
+        super().__init__(title=_("Quilt Motion Preview"))
+        self.set_default_size(1100, 600)
+        self.model = model
+        self.exporters = exporters
+
+        self.progress_mm = 0.0
+        self.speed_multiplier = 1.0
+        self.playing = True
+        self.last_tick: Optional[float] = None
+        self._timeout_id: Optional[int] = None
+
+        self._build_ui()
+        self.connect("destroy", self._on_destroy)
+        self._timeout_id = GLib.timeout_add(16, self._tick)
+
+    def _build_ui(self) -> None:
+        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        root.set_margin_top(12)
+        root.set_margin_bottom(12)
+        root.set_margin_start(12)
+        root.set_margin_end(12)
+        self.add(root)
+
+        self.drawing_area = Gtk.DrawingArea()
+        self.drawing_area.set_hexpand(True)
+        self.drawing_area.set_vexpand(True)
+        self.drawing_area.connect("draw", self._on_draw)
+        root.pack_start(self.drawing_area, True, True, 0)
+
+        sidebar = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=8
+        )
+        sidebar.set_size_request(280, -1)
+        root.pack_start(sidebar, False, False, 0)
+
+        controls = Gtk.Box(spacing=6)
+        sidebar.pack_start(controls, False, False, 0)
+
+        self.play_button = Gtk.Button(label=_("Pause"))
+        self.play_button.connect("clicked", self._toggle_play)
+        controls.pack_start(self.play_button, True, True, 0)
+
+        restart_button = Gtk.Button(label=_("Restart"))
+        restart_button.connect("clicked", self._restart)
+        controls.pack_start(restart_button, True, True, 0)
+
+        speed_label = Gtk.Label(label=_("Preview speed"))
+        speed_label.set_xalign(0.0)
+        sidebar.pack_start(speed_label, False, False, 0)
+
+        adjustment = Gtk.Adjustment(1.0, 0.1, 5.0, 0.1, 0.5, 0.0)
+        self.speed_slider = Gtk.Scale(
+            orientation=Gtk.Orientation.HORIZONTAL, adjustment=adjustment
+        )
+        self.speed_slider.connect("value-changed", self._on_speed_changed)
+        self.speed_slider.set_value(1.0)
+        sidebar.pack_start(self.speed_slider, False, False, 0)
+
+        self.speed_value_label = Gtk.Label(label=_("1.00×"))
+        self.speed_value_label.set_xalign(0.0)
+        sidebar.pack_start(self.speed_value_label, False, False, 0)
+
+        self.preview_status = Gtk.Label()
+        self.preview_status.set_xalign(0.0)
+        sidebar.pack_start(self.preview_status, False, False, 0)
+
+        sidebar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+
+        export_label = Gtk.Label(label=_("Export format"))
+        export_label.set_xalign(0.0)
+        sidebar.pack_start(export_label, False, False, 0)
+
+        self.format_combo = Gtk.ComboBoxText()
+        for key, profile in self.exporters.items():
+            self.format_combo.append_text(f"{key} – {profile.title}")
+        self.format_combo.set_active(0)
+        sidebar.pack_start(self.format_combo, False, False, 0)
+
+        export_button = Gtk.Button(label=_("Export…"))
+        export_button.connect("clicked", self._export)
+        sidebar.pack_start(export_button, False, False, 4)
+
+        self.export_status = Gtk.Label()
+        self.export_status.set_xalign(0.0)
+        sidebar.pack_start(self.export_status, False, False, 0)
+
+        self.show_all()
+
+    # UI callbacks -----------------------------------------------------
+    def _toggle_play(self, *_args) -> None:
+        self.playing = not self.playing
+        self.play_button.set_label(_("Pause") if self.playing else _("Play"))
+        self.last_tick = time.monotonic()
+
+    def _restart(self, *_args) -> None:
+        self.progress_mm = 0.0
+        self.playing = False
+        self.play_button.set_label(_("Play"))
+        self.last_tick = time.monotonic()
+        self.drawing_area.queue_draw()
+
+    def _on_speed_changed(self, slider: Gtk.Scale) -> None:
+        self.speed_multiplier = slider.get_value()
+        self.speed_value_label.set_label(f"{self.speed_multiplier:.2f}×")
+
+    def _export(self, *_args) -> None:
+        active = self.format_combo.get_active()
+        if active < 0:
+            return
+        format_key = list(self.exporters.keys())[active]
+        profile = self.exporters[format_key]
+
+        dialog = Gtk.FileChooserDialog(
+            title=_("Export Motion Path"),
+            parent=self,
+            action=Gtk.FileChooserAction.SAVE,
+        )
+        dialog.add_buttons(
+            Gtk.STOCK_CANCEL,
+            Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_SAVE,
+            Gtk.ResponseType.OK,
+        )
+        dialog.set_current_name(f"quilt_path.{profile.extension}")
+        response = dialog.run()
+        filename: Optional[str] = None
+        if response == Gtk.ResponseType.OK:
+            filename = dialog.get_filename()
+        dialog.destroy()
+
+        if not filename:
+            return
+
+        out_path = Path(filename)
+        if out_path.suffix.lower() != f".{profile.extension.lower()}":
+            out_path = out_path.with_suffix(f".{profile.extension.lower()}")
+
+        try:
+            profile.writer(self.model, out_path)
+        except Exception as exc:  # pragma: no cover - GUI feedback
+            self.export_status.set_text(_("Export failed: ") + str(exc))
+            return
+
+        self.export_status.set_text(_("Exported to ") + str(out_path))
+
+    def _on_destroy(self, *_args) -> None:
+        if self._timeout_id is not None:
+            GLib.source_remove(self._timeout_id)
+            self._timeout_id = None
+        Gtk.main_quit()
+
+    def _tick(self) -> bool:
+        if not self.playing or not self.model.edges:
+            return True
+        now = time.monotonic()
+        if self.last_tick is None:
+            self.last_tick = now
+            return True
+
+        delta = now - self.last_tick
+        self.last_tick = now
+
+        advance = delta * self.BASE_SPEED_MM_PER_SEC * self.speed_multiplier
+        self.progress_mm += advance
+        if self.progress_mm >= self.model.total_length_mm:
+            self.progress_mm = self.model.total_length_mm
+            self.playing = False
+            self.play_button.set_label(_("Play"))
+        self.drawing_area.queue_draw()
+        return True
+
+    # Drawing ----------------------------------------------------------
+    def _on_draw(self, widget: Gtk.DrawingArea, cr) -> None:
+        width = widget.get_allocated_width()
+        height = widget.get_allocated_height()
+        cr.save()
+        cr.set_source_rgb(0.08, 0.08, 0.1)
+        cr.paint()
+        cr.restore()
+
+        if not self.model.edges:
+            self.preview_status.set_text(_("Select at least one path to preview."))
+            return
+
+        scale, offset_x, offset_y = self._compute_viewport(width, height)
+        cr.translate(offset_x, offset_y)
+        cr.scale(scale, scale)
+
+        self._draw_full_path(cr)
+        self._draw_progress(cr)
+
+        point, needle_down = self.model.point_at(self.progress_mm)
+        cr.save()
+        cr.translate(point[0], point[1])
+        cr.set_source_rgba(0.99, 0.71, 0.2, 1.0 if needle_down else 0.6)
+        radius = 4.0 / scale
+        cr.arc(0, 0, radius, 0, math.tau)
+        cr.fill()
+        cr.restore()
+
+        stitched = min(self.progress_mm, self.model.total_length_mm)
+        percent = (stitched / self.model.total_length_mm * 100.0) if self.model.total_length_mm else 0.0
+        self.preview_status.set_text(
+            _("Path length: {length:.1f} mm   Previewed: {progress:.1f} mm ({pct:.1f}%)").format(
+                length=self.model.total_length_mm, progress=stitched, pct=percent
+            )
+        )
+
+    def _compute_viewport(self, width: int, height: int) -> Tuple[float, float, float]:
+        min_x, min_y, max_x, max_y = self.model.bounds
+        margin = 0.05
+        span_x = max(max_x - min_x, 1e-3)
+        span_y = max(max_y - min_y, 1e-3)
+        scale_x = width * (1.0 - margin) / span_x
+        scale_y = height * (1.0 - margin) / span_y
+        scale = min(scale_x, scale_y)
+        offset_x = (width - span_x * scale) / 2.0 - min_x * scale
+        offset_y = (height - span_y * scale) / 2.0 - min_y * scale
+        return scale, offset_x, offset_y
+
+    def _draw_full_path(self, cr) -> None:
+        cr.save()
+        cr.set_line_width(1.0)
+        for seg in self.model.segments:
+            cr.set_source_rgba(0.35, 0.4, 0.55, 0.35 if seg.needle_down else 0.18)
+            cr.new_path()
+            pts = seg.points
+            cr.move_to(*pts[0])
+            for pt in pts[1:]:
+                cr.line_to(*pt)
+            cr.stroke()
+        cr.restore()
+
+    def _draw_progress(self, cr) -> None:
+        cr.save()
+        cr.set_line_width(2.0)
+        remaining = self.progress_mm
+
+        for edge in self.model.edges:
+            if remaining <= edge.start_length_mm:
+                continue
+            start = edge.start_px
+            end = edge.end_px
+            length_remaining = min(remaining - edge.start_length_mm, edge.length_mm)
+            if length_remaining <= 0:
+                continue
+
+            if length_remaining < edge.length_mm:
+                ratio = length_remaining / edge.length_mm if edge.length_mm else 0.0
+                end = (
+                    edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * ratio,
+                    edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * ratio,
+                )
+
+            cr.set_source_rgba(
+                0.96 if edge.needle_down else 0.65,
+                0.48 if edge.needle_down else 0.65,
+                0.2 if edge.needle_down else 0.65,
+                0.95 if edge.needle_down else 0.6,
+            )
+            cr.move_to(*start)
+            cr.line_to(*end)
+            cr.stroke()
+
+            if length_remaining < edge.length_mm:
+                break
+
+        cr.restore()
+
+
+# Export writers -------------------------------------------------------------
+def _write_txt(model: MotionPathModel, outfile: Path) -> None:
+    segments = model.iter_segments_mm()
+    lines = [
+        "# Quilt motion path export",
+        "# Columns: needle_down,x_mm,y_mm",
+    ]
+    for needle_down, pts in segments:
+        for x, y in pts:
+            lines.append(f"{1 if needle_down else 0},{x:.4f},{y:.4f}")
+        lines.append("# segment")
+    outfile.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_plt(model: MotionPathModel, outfile: Path) -> None:
+    units_per_mm = 40  # HPGL default (1016 dpi ≈ 40 units per mm)
+    commands: List[str] = ["IN;"]
+    for needle_down, pts in model.iter_segments_mm():
+        if not pts:
+            continue
+        hpgl_points = [f"{int(x * units_per_mm)},{int(y * units_per_mm)}" for x, y in pts]
+        prefix = "PD" if needle_down else "PU"
+        commands.append(f"{prefix}{hpgl_points[0]};")
+        if len(hpgl_points) > 1:
+            commands.append("PD" + ",".join(hpgl_points[1:]) + ";")
+    commands.append("PU0,0;")
+    outfile.write_text("\n".join(commands), encoding="ascii")
+
+
+def _write_dxf(model: MotionPathModel, outfile: Path) -> None:
+    def section(lines: List[str]) -> List[str]:
+        chunk: List[str] = []
+        for i in range(0, len(lines), 2):
+            chunk.extend(lines[i : i + 2])
+        return chunk
+
+    entities: List[str] = []
+    for idx, (needle_down, pts) in enumerate(model.iter_segments_mm()):
+        if len(pts) < 2:
+            continue
+        layer = "STITCH" if needle_down else "TRAVEL"
+        entities.extend(
+            [
+                "0",
+                "LWPOLYLINE",
+                "8",
+                layer,
+                "90",
+                str(len(pts)),
+                "70",
+                "0",
+            ]
+        )
+        for x, y in pts:
+            entities.extend(["10", f"{x:.4f}", "20", f"{y:.4f}"])
+    content = [
+        "0",
+        "SECTION",
+        "2",
+        "HEADER",
+        "0",
+        "ENDSEC",
+        "0",
+        "SECTION",
+        "2",
+        "ENTITIES",
+        *entities,
+        "0",
+        "ENDSEC",
+        "0",
+        "EOF",
+    ]
+    outfile.write_text("\n".join(content), encoding="ascii")
+
+
+def _write_generic_pointset(model: MotionPathModel, outfile: Path, fmt_name: str) -> None:
+    lines = [
+        f"# {fmt_name} stitch file generated by Quilt Motion Exporter",
+        "VERSION 1",
+        "UNITS MM",
+    ]
+    for needle_down, pts in model.iter_segments_mm():
+        block_type = "STITCH" if needle_down else "JUMP"
+        lines.append(f"BEGIN {block_type}")
+        for x, y in pts:
+            lines.append(f"{x:.3f} {y:.3f}")
+        lines.append("END")
+    outfile.write_text("\n".join(lines), encoding="utf-8")
+
+
+EXPORT_PROFILES: Dict[str, ExportProfile] = {
+    "BQM": ExportProfile(
+        title="IntelliQuilter BQM",
+        extension="bqm",
+        description="Text-based IntelliQuilter pattern",
+        writer=lambda model, dest: _write_generic_pointset(model, dest, "BQM"),
+    ),
+    "DXF": ExportProfile(
+        title="AutoCAD DXF (polyline)",
+        extension="dxf",
+        description="Light‑weight polyline DXF",
+        writer=_write_dxf,
+    ),
+    "HQF": ExportProfile(
+        title="Handi Quilter HQF",
+        extension="hqf",
+        description="Handi Quilter format",
+        writer=lambda model, dest: _write_generic_pointset(model, dest, "HQF"),
+    ),
+    "IQP": ExportProfile(
+        title="IntelliQuilter IQP",
+        extension="iqp",
+        description="IQP stitch file",
+        writer=lambda model, dest: _write_generic_pointset(model, dest, "IQP"),
+    ),
+    "PAT": ExportProfile(
+        title="Gammill PAT",
+        extension="pat",
+        description="PAT sequence",
+        writer=lambda model, dest: _write_generic_pointset(model, dest, "PAT"),
+    ),
+    "PLT": ExportProfile(
+        title="HPGL / PLT",
+        extension="plt",
+        description="HPGL commands",
+        writer=_write_plt,
+    ),
+    "QCC": ExportProfile(
+        title="QCC Quilting",
+        extension="qcc",
+        description="Statler QCC sequence",
+        writer=lambda model, dest: _write_generic_pointset(model, dest, "QCC"),
+    ),
+    "QLI": ExportProfile(
+        title="Statler QLI",
+        extension="qli",
+        description="QLI stitch file",
+        writer=lambda model, dest: _write_generic_pointset(model, dest, "QLI"),
+    ),
+    "SSD": ExportProfile(
+        title="SideSaddle SSD",
+        extension="ssd",
+        description="SideSaddle format",
+        writer=lambda model, dest: _write_generic_pointset(model, dest, "SSD"),
+    ),
+    "TXT": ExportProfile(
+        title="Plain text",
+        extension="txt",
+        description="CSV-inspired coordinate list",
+        writer=_write_txt,
+    ),
+}
+
+
+class QuiltMotionExportExtension(inkex.EffectExtension):
+    """Entry point for Inkscape."""
+
+    def effect(self) -> None:  # pragma: no cover - Inkscape runtime
+        if not GTK_AVAILABLE:
+            raise inkex.AbortExtension(
+                _("PyGObject (Gtk 3) is required for the preview UI.")
+            )
+
+        selection = self.svg.selection.filter(PathElement)
+        if not selection:
+            raise inkex.AbortExtension(_("Please select at least one path."))
+
+        tolerance = 0.4
+        ordered_segments: List[MotionSegment] = []
+        for elem in selection.values():
+            ordered_segments.extend(_flatten_path_element(elem, tolerance=tolerance))
+
+        if not ordered_segments:
+            raise inkex.AbortExtension(_("No drawable segments were found."))
+
+        px_to_mm = units.convert_unit("1px", "mm")
+        model = MotionPathModel(ordered_segments, px_to_mm=px_to_mm)
+        window = QuiltPreviewWindow(model, EXPORT_PROFILES)
+        window.present()
+        Gtk.main()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    QuiltMotionExportExtension().run()
