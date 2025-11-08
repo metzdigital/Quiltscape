@@ -12,6 +12,11 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 
 1. Copy the contents of this repository into Inkscape’s user extension directory. On Linux this is typically `~/.config/inkscape/extensions`. Create the folder if it does not exist.
 2. Restart Inkscape. The new entry appears under `Extensions → Quilting → Quilt Motion Preview & Export`.
+3. Make sure the Python bindings for Gtk are installed. On Ubuntu/Debian run:
+
+   ```bash
+   sudo apt install python3-gi python3-gi-cairo python3-cairo gir1.2-gtk-3.0
+   ```
 
 ## Usage
 
@@ -24,6 +29,10 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
    - The progress readout displays the stitched length and completion percentage.
    - Pick an export format and press **Export…** to write the file.
 5. The exported files list every stitch (and jump) in document millimetres. They can be loaded directly by many quilting systems or passed through manufacturer tooling if post-processing is required.
+
+### Snap sandbox note
+
+When running Inkscape from the Snap store, extensions may only write inside your home directory (and optionally removable-media if the interface is connected). The exporter now defaults the save dialog to `~/` and will display a clear message if you pick a location that the sandbox cannot access. If you need to save elsewhere, move the file afterward or connect the appropriate Snap interfaces.
 
 ## Implementation notes
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -21,15 +22,28 @@ from inkex.elements import PathElement
 from inkex.localization import inkex_gettext as _
 from inkex.paths import CubicSuperPath
 
+warnings.filterwarnings(
+    "ignore",
+    message="DynamicImporter\\.exec_module\\(\\) not found; falling back to load_module\\(\\)",
+    category=ImportWarning,
+)
+
+GTK_AVAILABLE = False
+GTK_LOAD_ERROR: Optional[str] = None
+
 try:
     import gi  # type: ignore
 
     gi.require_version("Gtk", "3.0")
-    from gi.repository import GLib, Gtk  # type: ignore
+    gi.require_foreign("cairo")
+
+    from gi.repository import GLib, Gtk, cairo as gi_cairo  # type: ignore
+    import cairo  # type: ignore
 
     GTK_AVAILABLE = True
-except Exception:  # pragma: no cover - Gtk is only available inside Inkscape
+except Exception as exc:  # pragma: no cover - Gtk is only available inside Inkscape
     GTK_AVAILABLE = False
+    GTK_LOAD_ERROR = str(exc)
     GLib = None  # type: ignore
     Gtk = None  # type: ignore
 
@@ -174,284 +188,317 @@ class ExportProfile:
         self.writer = writer
 
 
-class QuiltPreviewWindow(Gtk.Window):  # type: ignore[misc]
-    """Interactive GTK window that previews and exports the motion path."""
+if GTK_AVAILABLE:
+    class QuiltPreviewWindow(Gtk.Window):  # type: ignore[misc]
+        """Interactive GTK window that previews and exports the motion path."""
 
-    BASE_SPEED_MM_PER_SEC = 35.0
+        BASE_SPEED_MM_PER_SEC = 35.0
 
-    def __init__(
-        self,
-        model: MotionPathModel,
-        exporters: Dict[str, ExportProfile],
-    ) -> None:
-        super().__init__(title=_("Quilt Motion Preview"))
-        self.set_default_size(1100, 600)
-        self.model = model
-        self.exporters = exporters
+        def __init__(
+            self,
+            model: MotionPathModel,
+            exporters: Dict[str, ExportProfile],
+        ) -> None:
+            super().__init__(title=_("Quilt Motion Preview"))
+            self.set_default_size(1100, 600)
+            self.model = model
+            self.exporters = exporters
 
-        self.progress_mm = 0.0
-        self.speed_multiplier = 1.0
-        self.playing = True
-        self.last_tick: Optional[float] = None
-        self._timeout_id: Optional[int] = None
+            self.progress_mm = 0.0
+            self.speed_multiplier = 1.0
+            self.playing = True
+            self.last_tick: Optional[float] = None
+            self._timeout_id: Optional[int] = None
 
-        self._build_ui()
-        self.connect("destroy", self._on_destroy)
-        self._timeout_id = GLib.timeout_add(16, self._tick)
+            self._build_ui()
+            self.connect("destroy", self._on_destroy)
+            self._timeout_id = GLib.timeout_add(16, self._tick)
 
-    def _build_ui(self) -> None:
-        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-        root.set_margin_top(12)
-        root.set_margin_bottom(12)
-        root.set_margin_start(12)
-        root.set_margin_end(12)
-        self.add(root)
+        def _build_ui(self) -> None:
+            root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+            root.set_margin_top(12)
+            root.set_margin_bottom(12)
+            root.set_margin_start(12)
+            root.set_margin_end(12)
+            self.add(root)
 
-        self.drawing_area = Gtk.DrawingArea()
-        self.drawing_area.set_hexpand(True)
-        self.drawing_area.set_vexpand(True)
-        self.drawing_area.connect("draw", self._on_draw)
-        root.pack_start(self.drawing_area, True, True, 0)
+            self.drawing_area = Gtk.DrawingArea()
+            self.drawing_area.set_hexpand(True)
+            self.drawing_area.set_vexpand(True)
+            self.drawing_area.connect("draw", self._on_draw)
+            root.pack_start(self.drawing_area, True, True, 0)
 
-        sidebar = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL, spacing=8
-        )
-        sidebar.set_size_request(280, -1)
-        root.pack_start(sidebar, False, False, 0)
+            sidebar = Gtk.Box(
+                orientation=Gtk.Orientation.VERTICAL, spacing=8
+            )
+            sidebar.set_size_request(280, -1)
+            root.pack_start(sidebar, False, False, 0)
 
-        controls = Gtk.Box(spacing=6)
-        sidebar.pack_start(controls, False, False, 0)
+            controls = Gtk.Box(spacing=6)
+            sidebar.pack_start(controls, False, False, 0)
 
-        self.play_button = Gtk.Button(label=_("Pause"))
-        self.play_button.connect("clicked", self._toggle_play)
-        controls.pack_start(self.play_button, True, True, 0)
+            self.play_button = Gtk.Button(label=_("Pause"))
+            self.play_button.connect("clicked", self._toggle_play)
+            controls.pack_start(self.play_button, True, True, 0)
 
-        restart_button = Gtk.Button(label=_("Restart"))
-        restart_button.connect("clicked", self._restart)
-        controls.pack_start(restart_button, True, True, 0)
+            restart_button = Gtk.Button(label=_("Restart"))
+            restart_button.connect("clicked", self._restart)
+            controls.pack_start(restart_button, True, True, 0)
 
-        speed_label = Gtk.Label(label=_("Preview speed"))
-        speed_label.set_xalign(0.0)
-        sidebar.pack_start(speed_label, False, False, 0)
+            speed_label = Gtk.Label(label=_("Preview speed"))
+            speed_label.set_xalign(0.0)
+            sidebar.pack_start(speed_label, False, False, 0)
 
-        adjustment = Gtk.Adjustment(1.0, 0.1, 5.0, 0.1, 0.5, 0.0)
-        self.speed_slider = Gtk.Scale(
-            orientation=Gtk.Orientation.HORIZONTAL, adjustment=adjustment
-        )
-        self.speed_slider.connect("value-changed", self._on_speed_changed)
-        self.speed_slider.set_value(1.0)
-        sidebar.pack_start(self.speed_slider, False, False, 0)
+            adjustment = Gtk.Adjustment(
+                value=1.0,
+                lower=0.1,
+                upper=5.0,
+                step_increment=0.1,
+                page_increment=0.5,
+                page_size=0.0,
+            )
+            self.speed_slider = Gtk.Scale(
+                orientation=Gtk.Orientation.HORIZONTAL, adjustment=adjustment
+            )
+            self.speed_slider.connect("value-changed", self._on_speed_changed)
+            self.speed_slider.set_value(1.0)
+            sidebar.pack_start(self.speed_slider, False, False, 0)
 
-        self.speed_value_label = Gtk.Label(label=_("1.00×"))
-        self.speed_value_label.set_xalign(0.0)
-        sidebar.pack_start(self.speed_value_label, False, False, 0)
+            self.speed_value_label = Gtk.Label(label=_("1.00×"))
+            self.speed_value_label.set_xalign(0.0)
+            sidebar.pack_start(self.speed_value_label, False, False, 0)
 
-        self.preview_status = Gtk.Label()
-        self.preview_status.set_xalign(0.0)
-        sidebar.pack_start(self.preview_status, False, False, 0)
+            self.preview_status = Gtk.Label()
+            self.preview_status.set_xalign(0.0)
+            sidebar.pack_start(self.preview_status, False, False, 0)
 
-        sidebar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+            sidebar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
 
-        export_label = Gtk.Label(label=_("Export format"))
-        export_label.set_xalign(0.0)
-        sidebar.pack_start(export_label, False, False, 0)
+            export_label = Gtk.Label(label=_("Export format"))
+            export_label.set_xalign(0.0)
+            sidebar.pack_start(export_label, False, False, 0)
 
-        self.format_combo = Gtk.ComboBoxText()
-        for key, profile in self.exporters.items():
-            self.format_combo.append_text(f"{key} – {profile.title}")
-        self.format_combo.set_active(0)
-        sidebar.pack_start(self.format_combo, False, False, 0)
+            self.format_combo = Gtk.ComboBoxText()
+            for key, profile in self.exporters.items():
+                self.format_combo.append_text(f"{key} – {profile.title}")
+            self.format_combo.set_active(0)
+            sidebar.pack_start(self.format_combo, False, False, 0)
 
-        export_button = Gtk.Button(label=_("Export…"))
-        export_button.connect("clicked", self._export)
-        sidebar.pack_start(export_button, False, False, 4)
+            export_button = Gtk.Button(label=_("Export…"))
+            export_button.connect("clicked", self._export)
+            sidebar.pack_start(export_button, False, False, 4)
 
-        self.export_status = Gtk.Label()
-        self.export_status.set_xalign(0.0)
-        sidebar.pack_start(self.export_status, False, False, 0)
+            self.export_status = Gtk.Label()
+            self.export_status.set_xalign(0.0)
+            sidebar.pack_start(self.export_status, False, False, 0)
 
-        self.show_all()
+            self.show_all()
 
-    # UI callbacks -----------------------------------------------------
-    def _toggle_play(self, *_args) -> None:
-        self.playing = not self.playing
-        self.play_button.set_label(_("Pause") if self.playing else _("Play"))
-        self.last_tick = time.monotonic()
+        def _toggle_play(self, *_args) -> None:
+            self.playing = not self.playing
+            self.play_button.set_label(_("Pause") if self.playing else _("Play"))
+            self.last_tick = time.monotonic()
 
-    def _restart(self, *_args) -> None:
-        self.progress_mm = 0.0
-        self.playing = False
-        self.play_button.set_label(_("Play"))
-        self.last_tick = time.monotonic()
-        self.drawing_area.queue_draw()
-
-    def _on_speed_changed(self, slider: Gtk.Scale) -> None:
-        self.speed_multiplier = slider.get_value()
-        self.speed_value_label.set_label(f"{self.speed_multiplier:.2f}×")
-
-    def _export(self, *_args) -> None:
-        active = self.format_combo.get_active()
-        if active < 0:
-            return
-        format_key = list(self.exporters.keys())[active]
-        profile = self.exporters[format_key]
-
-        dialog = Gtk.FileChooserDialog(
-            title=_("Export Motion Path"),
-            parent=self,
-            action=Gtk.FileChooserAction.SAVE,
-        )
-        dialog.add_buttons(
-            Gtk.STOCK_CANCEL,
-            Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_SAVE,
-            Gtk.ResponseType.OK,
-        )
-        dialog.set_current_name(f"quilt_path.{profile.extension}")
-        response = dialog.run()
-        filename: Optional[str] = None
-        if response == Gtk.ResponseType.OK:
-            filename = dialog.get_filename()
-        dialog.destroy()
-
-        if not filename:
-            return
-
-        out_path = Path(filename)
-        if out_path.suffix.lower() != f".{profile.extension.lower()}":
-            out_path = out_path.with_suffix(f".{profile.extension.lower()}")
-
-        try:
-            profile.writer(self.model, out_path)
-        except Exception as exc:  # pragma: no cover - GUI feedback
-            self.export_status.set_text(_("Export failed: ") + str(exc))
-            return
-
-        self.export_status.set_text(_("Exported to ") + str(out_path))
-
-    def _on_destroy(self, *_args) -> None:
-        if self._timeout_id is not None:
-            GLib.source_remove(self._timeout_id)
-            self._timeout_id = None
-        Gtk.main_quit()
-
-    def _tick(self) -> bool:
-        if not self.playing or not self.model.edges:
-            return True
-        now = time.monotonic()
-        if self.last_tick is None:
-            self.last_tick = now
-            return True
-
-        delta = now - self.last_tick
-        self.last_tick = now
-
-        advance = delta * self.BASE_SPEED_MM_PER_SEC * self.speed_multiplier
-        self.progress_mm += advance
-        if self.progress_mm >= self.model.total_length_mm:
-            self.progress_mm = self.model.total_length_mm
+        def _restart(self, *_args) -> None:
+            self.progress_mm = 0.0
             self.playing = False
             self.play_button.set_label(_("Play"))
-        self.drawing_area.queue_draw()
-        return True
+            self.last_tick = time.monotonic()
+            self.drawing_area.queue_draw()
 
-    # Drawing ----------------------------------------------------------
-    def _on_draw(self, widget: Gtk.DrawingArea, cr) -> None:
-        width = widget.get_allocated_width()
-        height = widget.get_allocated_height()
-        cr.save()
-        cr.set_source_rgb(0.08, 0.08, 0.1)
-        cr.paint()
-        cr.restore()
+        def _on_speed_changed(self, slider: Gtk.Scale) -> None:
+            self.speed_multiplier = slider.get_value()
+            self.speed_value_label.set_label(f"{self.speed_multiplier:.2f}×")
 
-        if not self.model.edges:
-            self.preview_status.set_text(_("Select at least one path to preview."))
-            return
+        def _export(self, *_args) -> None:
+            active = self.format_combo.get_active()
+            if active < 0:
+                return
+            format_key = list(self.exporters.keys())[active]
+            profile = self.exporters[format_key]
 
-        scale, offset_x, offset_y = self._compute_viewport(width, height)
-        cr.translate(offset_x, offset_y)
-        cr.scale(scale, scale)
-
-        self._draw_full_path(cr)
-        self._draw_progress(cr)
-
-        point, needle_down = self.model.point_at(self.progress_mm)
-        cr.save()
-        cr.translate(point[0], point[1])
-        cr.set_source_rgba(0.99, 0.71, 0.2, 1.0 if needle_down else 0.6)
-        radius = 4.0 / scale
-        cr.arc(0, 0, radius, 0, math.tau)
-        cr.fill()
-        cr.restore()
-
-        stitched = min(self.progress_mm, self.model.total_length_mm)
-        percent = (stitched / self.model.total_length_mm * 100.0) if self.model.total_length_mm else 0.0
-        self.preview_status.set_text(
-            _("Path length: {length:.1f} mm   Previewed: {progress:.1f} mm ({pct:.1f}%)").format(
-                length=self.model.total_length_mm, progress=stitched, pct=percent
+            dialog = Gtk.FileChooserDialog(
+                title=_("Export Motion Path"),
+                transient_for=self,
+                modal=True,
+                action=Gtk.FileChooserAction.SAVE,
             )
-        )
+            dialog.add_buttons(
+                Gtk.STOCK_CANCEL,
+                Gtk.ResponseType.CANCEL,
+                Gtk.STOCK_SAVE,
+                Gtk.ResponseType.OK,
+            )
+            try:
+                dialog.set_current_folder(str(Path.home()))
+            except Exception:
+                pass
+            dialog.set_current_name(f"quilt_path.{profile.extension}")
+            response = dialog.run()
+            filename: Optional[str] = None
+            if response == Gtk.ResponseType.OK:
+                filename = dialog.get_filename()
+            dialog.destroy()
 
-    def _compute_viewport(self, width: int, height: int) -> Tuple[float, float, float]:
-        min_x, min_y, max_x, max_y = self.model.bounds
-        margin = 0.05
-        span_x = max(max_x - min_x, 1e-3)
-        span_y = max(max_y - min_y, 1e-3)
-        scale_x = width * (1.0 - margin) / span_x
-        scale_y = height * (1.0 - margin) / span_y
-        scale = min(scale_x, scale_y)
-        offset_x = (width - span_x * scale) / 2.0 - min_x * scale
-        offset_y = (height - span_y * scale) / 2.0 - min_y * scale
-        return scale, offset_x, offset_y
+            if not filename:
+                return
 
-    def _draw_full_path(self, cr) -> None:
-        cr.save()
-        cr.set_line_width(1.0)
-        for seg in self.model.segments:
-            cr.set_source_rgba(0.35, 0.4, 0.55, 0.35 if seg.needle_down else 0.18)
-            cr.new_path()
-            pts = seg.points
-            cr.move_to(*pts[0])
-            for pt in pts[1:]:
-                cr.line_to(*pt)
-            cr.stroke()
-        cr.restore()
+            out_path = Path(filename)
+            if out_path.suffix.lower() != f".{profile.extension.lower()}":
+                out_path = out_path.with_suffix(f".{profile.extension.lower()}")
 
-    def _draw_progress(self, cr) -> None:
-        cr.save()
-        cr.set_line_width(2.0)
-        remaining = self.progress_mm
-
-        for edge in self.model.edges:
-            if remaining <= edge.start_length_mm:
-                continue
-            start = edge.start_px
-            end = edge.end_px
-            length_remaining = min(remaining - edge.start_length_mm, edge.length_mm)
-            if length_remaining <= 0:
-                continue
-
-            if length_remaining < edge.length_mm:
-                ratio = length_remaining / edge.length_mm if edge.length_mm else 0.0
-                end = (
-                    edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * ratio,
-                    edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * ratio,
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+            except PermissionError:
+                self.export_status.set_text(
+                    _("No permission to create folder: ") + str(out_path.parent)
                 )
+                return
+            except FileExistsError:
+                pass
 
-            cr.set_source_rgba(
-                0.96 if edge.needle_down else 0.65,
-                0.48 if edge.needle_down else 0.65,
-                0.2 if edge.needle_down else 0.65,
-                0.95 if edge.needle_down else 0.6,
+            try:
+                profile.writer(self.model, out_path)
+            except PermissionError:
+                self.export_status.set_text(
+                    _("Cannot write to {path}. Pick a folder inside your home directory.").format(
+                        path=str(out_path)
+                    )
+                )
+                return
+            except Exception as exc:  # pragma: no cover - GUI feedback
+                self.export_status.set_text(_("Export failed: ") + str(exc))
+                return
+
+            self.export_status.set_text(_("Exported to ") + str(out_path))
+
+        def _on_destroy(self, *_args) -> None:
+            if self._timeout_id is not None:
+                GLib.source_remove(self._timeout_id)
+                self._timeout_id = None
+            Gtk.main_quit()
+
+        def _tick(self) -> bool:
+            if not self.playing or not self.model.edges:
+                return True
+            now = time.monotonic()
+            if self.last_tick is None:
+                self.last_tick = now
+                return True
+
+            delta = now - self.last_tick
+            self.last_tick = now
+
+            advance = delta * self.BASE_SPEED_MM_PER_SEC * self.speed_multiplier
+            self.progress_mm += advance
+            if self.progress_mm >= self.model.total_length_mm:
+                self.progress_mm = self.model.total_length_mm
+                self.playing = False
+                self.play_button.set_label(_("Play"))
+            self.drawing_area.queue_draw()
+            return True
+
+        def _on_draw(self, widget: Gtk.DrawingArea, cr) -> None:
+            width = widget.get_allocated_width()
+            height = widget.get_allocated_height()
+            cr.save()
+            cr.set_source_rgb(0.08, 0.08, 0.1)
+            cr.paint()
+            cr.restore()
+
+            if not self.model.edges:
+                self.preview_status.set_text(_("Select at least one path to preview."))
+                return
+
+            scale, offset_x, offset_y = self._compute_viewport(width, height)
+            cr.translate(offset_x, offset_y)
+            cr.scale(scale, scale)
+
+            self._draw_full_path(cr)
+            self._draw_progress(cr)
+
+            point, needle_down = self.model.point_at(self.progress_mm)
+            cr.save()
+            cr.translate(point[0], point[1])
+            cr.set_source_rgba(0.99, 0.71, 0.2, 1.0 if needle_down else 0.6)
+            radius = 4.0 / scale
+            cr.arc(0, 0, radius, 0, math.tau)
+            cr.fill()
+            cr.restore()
+
+            stitched = min(self.progress_mm, self.model.total_length_mm)
+            percent = (stitched / self.model.total_length_mm * 100.0) if self.model.total_length_mm else 0.0
+            self.preview_status.set_text(
+                _("Path length: {length:.1f} mm   Previewed: {progress:.1f} mm ({pct:.1f}%)").format(
+                    length=self.model.total_length_mm, progress=stitched, pct=percent
+                )
             )
-            cr.move_to(*start)
-            cr.line_to(*end)
-            cr.stroke()
 
-            if length_remaining < edge.length_mm:
-                break
+        def _compute_viewport(self, width: int, height: int) -> Tuple[float, float, float]:
+            min_x, min_y, max_x, max_y = self.model.bounds
+            margin = 0.05
+            span_x = max(max_x - min_x, 1e-3)
+            span_y = max(max_y - min_y, 1e-3)
+            scale_x = width * (1.0 - margin) / span_x
+            scale_y = height * (1.0 - margin) / span_y
+            scale = min(scale_x, scale_y)
+            offset_x = (width - span_x * scale) / 2.0 - min_x * scale
+            offset_y = (height - span_y * scale) / 2.0 - min_y * scale
+            return scale, offset_x, offset_y
 
-        cr.restore()
+        def _draw_full_path(self, cr) -> None:
+            cr.save()
+            cr.set_line_width(1.0)
+            for seg in self.model.segments:
+                cr.set_source_rgba(0.35, 0.4, 0.55, 0.35 if seg.needle_down else 0.18)
+                cr.new_path()
+                pts = seg.points
+                cr.move_to(*pts[0])
+                for pt in pts[1:]:
+                    cr.line_to(*pt)
+                cr.stroke()
+            cr.restore()
+
+        def _draw_progress(self, cr) -> None:
+            cr.save()
+            cr.set_line_width(2.0)
+            remaining = self.progress_mm
+
+            for edge in self.model.edges:
+                if remaining <= edge.start_length_mm:
+                    continue
+                start = edge.start_px
+                end = edge.end_px
+                length_remaining = min(remaining - edge.start_length_mm, edge.length_mm)
+                if length_remaining <= 0:
+                    continue
+
+                if length_remaining < edge.length_mm:
+                    ratio = length_remaining / edge.length_mm if edge.length_mm else 0.0
+                    end = (
+                        edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * ratio,
+                        edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * ratio,
+                    )
+
+                cr.set_source_rgba(
+                    0.96 if edge.needle_down else 0.65,
+                    0.48 if edge.needle_down else 0.65,
+                    0.2 if edge.needle_down else 0.65,
+                    0.95 if edge.needle_down else 0.6,
+                )
+                cr.move_to(*start)
+                cr.line_to(*end)
+                cr.stroke()
+
+                if length_remaining < edge.length_mm:
+                    break
+
+            cr.restore()
+else:
+    class QuiltPreviewWindow:  # pragma: no cover - placeholder when GTK missing
+        pass
+
+
 
 
 # Export writers -------------------------------------------------------------
@@ -613,9 +660,15 @@ class QuiltMotionExportExtension(inkex.EffectExtension):
 
     def effect(self) -> None:  # pragma: no cover - Inkscape runtime
         if not GTK_AVAILABLE:
-            raise inkex.AbortExtension(
-                _("PyGObject (Gtk 3) is required for the preview UI.")
+            detail = (
+                _(
+                    "PyGObject (Gtk 3) is required for the preview UI. "
+                    "Install the packages python3-gi, python3-gi-cairo, python3-cairo, and gir1.2-gtk-3.0."
+                )
             )
+            if GTK_LOAD_ERROR:
+                detail = f"{detail}\n{GTK_LOAD_ERROR}"
+            raise inkex.AbortExtension(detail)
 
         selection = self.svg.selection.filter(PathElement)
         if not selection:
