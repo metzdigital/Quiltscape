@@ -2,9 +2,10 @@
 
 An Inkscape extension that turns any vector path into a long‑arm quilting motion path. It lets you:
 
-- Preserve the draw order of the selected paths.
-- Watch the stitching sequence in a live GTK preview (play, pause, restart, adjustable speed).
-- Export the resulting motion path to several quilting machine formats (BQM, DXF, HQF, IQP, PAT, PLT, QCC, QLI, SSD, TXT).
+- Preserve the draw order of the selected paths and animate them with play/pause/restart plus adjustable speed.
+- Scrub through the design with a progress slider to inspect any stitch in context.
+- Visualize the pattern as a multi-row pantograph (repeat count, rows, row spacing, stagger toggle, stagger percent) with a light-themed GTK preview.
+- Export the resulting motion path to several quilting machine formats (BQM, DXF, HQF, IQP, PAT, PLT, QCC, QLI, SSD, TXT), all in millimetres.
 
 > **Note:** The machine formats included here rely on open, text-based encodings of the stitch path. Every format is generated from the same normalized point stream, so the files remain easy to post-process with vendor-provided converters if needed.
 
@@ -49,10 +50,10 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 2. Select the path objects you want to export.
 3. Open `Extensions → Quilting → Quilt Motion Preview & Export` and click **Apply**.
 4. Use the preview window:
-   - **Play/Pause/Restart** control the animation.
-   - Adjust the **Preview speed** slider to see the stitches rendered faster or slower.
-   - The progress readout displays the stitched length and completion percentage.
-   - Pick an export format and press **Export…** to write the file.
+   - **Play/Pause/Restart** control the animation, while the **Preview speed** slider changes draw speed.
+   - Drag the **Progress** slider to jump to any point along the stitch path.
+   - Adjust the **Pantograph layout** panel to tile the design into repeated rows (control repeats, rows, row distance in mm, stagger toggle, stagger percent). The preview updates instantly to show the full pantograph layout.
+   - Pick an export format and press **Export…** to write a file (exports remain a single pattern so you can tile downstream as needed).
 5. The exported files list every stitch (and jump) in document millimetres. They can be loaded directly by many quilting systems or passed through manufacturer tooling if post-processing is required.
 
 ### Snap sandbox note
@@ -64,6 +65,7 @@ When running Inkscape from the Snap store, extensions may only write inside your
 - The preview window is built with PyGObject/Gtk 3, which ships with modern Inkscape builds.
 - Paths are flattened via Inkscape’s `CubicSuperPath` utilities to keep Bézier curves accurate. Each sub‑path becomes a stitch segment, and travel jumps are inserted between disconnected components so long-arm controllers can raise the needle when necessary.
 - Exporters live in `extensions/quilt_motion_exporter.py`. Each format is represented by a small writer function that receives the normalized motion model—adding more formats is as simple as registering another `ExportProfile`.
+- Pantograph repeats are rendered purely in the preview: we offset each instance by the actual delta between its start and end nodes, optionally staggering alternate rows so you can audition complex layouts without duplicating geometry inside the SVG.
 
 ## Testing / Development
 
@@ -95,4 +97,4 @@ The extension writes every format from the same flattened stitch stream (in docu
 - **BQM / HQF / IQP / PAT / QCC / QLI / SSD** – simple text blocks. Each file begins with a short header, then repeats `BEGIN STITCH` and `BEGIN JUMP` segments listing `x y` coordinates in millimetres so vendor utilities can import the path. These formats differ mostly by filename extension but match each machine’s expected plain-text style, making it easy to post-process or load directly.
 - **DXF** – AutoCAD “lightweight polyline” (LWPOLYLINE) entities. Stitch segments go on layer `STITCH`, jump segments on `TRAVEL`. This is ideal for CAD-based quilting workflows.
 - **PLT** – HPGL commands that encode jumps (`PU`) and stitches (`PD`) in 40 units per millimetre, matching the classic plotter-style command stream used by some long-arm systems.
-- **TXT** – CSV-like data that lists every point as `needle_down,x_mm,y_mm`, providing a machine-agnostic spreadsheet-friendly dump for debugging or custom conversions.
+- **TXT** – Plain text list of `x y` millimetre pairs (one per line) for quick inspection, spreadsheet import, or conversion scripts.
