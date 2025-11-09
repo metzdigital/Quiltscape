@@ -37,7 +37,8 @@ try:
     gi.require_version("Gtk", "3.0")
     gi.require_foreign("cairo")
 
-    from gi.repository import GLib, Gtk, cairo as gi_cairo  # type: ignore
+    gi.require_version("Pango", "1.0")
+    from gi.repository import GLib, Gtk, Pango, cairo as gi_cairo  # type: ignore
     import cairo  # type: ignore
 
     GTK_AVAILABLE = True
@@ -77,10 +78,12 @@ class MotionEdge:
 class MotionPathModel:
     """Holds a stitched path flattened to monotonic, ordered geometry."""
 
-    def __init__(self, segments: List[MotionSegment], px_to_mm: float) -> None:
+    def __init__(self, segments: List[MotionSegment], px_to_mm: float, doc_height_px: Optional[float] = None) -> None:
         stitched = [seg for seg in segments if len(seg.points) >= 2]
         self.segments = stitched
         self.px_to_mm = px_to_mm
+        self.doc_height_px = doc_height_px
+        self.doc_height_mm = (doc_height_px * px_to_mm) if doc_height_px else None
         self.edges: List[MotionEdge] = []
         self.total_length_mm = 0.0
 
@@ -109,16 +112,12 @@ class MotionPathModel:
             self.bounds = (0.0, 0.0, 1.0, 1.0)
 
     def iter_segments_mm(self) -> List[Tuple[bool, List[Point]]]:
-        """Return the motion path as mm‑based sequences preserving needle state."""
+        """Return the motion path as absolute millimetre coordinates."""
         factor = self.px_to_mm
         converted: List[Tuple[bool, List[Point]]] = []
         for seg in self.segments:
-            converted.append(
-                (
-                    seg.needle_down,
-                    [(x * factor, y * factor) for x, y in seg.points],
-                )
-            )
+            pts = [(x * factor, y * factor) for x, y in seg.points]
+            converted.append((seg.needle_down, pts))
         return converted
 
     def point_at(self, length_mm: float) -> Tuple[Point, bool]:
@@ -209,10 +208,17 @@ if GTK_AVAILABLE:
             self.playing = True
             self.last_tick: Optional[float] = None
             self._timeout_id: Optional[int] = None
+            self._static_surface: Optional[cairo.ImageSurface] = None
+            self._static_surface_size: Tuple[int, int] = (0, 0)
+            self._surface_dirty = True
+            self._viewport: Optional[Tuple[float, float, float]] = None
+            self._prime_source: Optional[int] = None
+            self._updating_progress_slider = False
 
             self._build_ui()
             self.connect("destroy", self._on_destroy)
             self._timeout_id = GLib.timeout_add(16, self._tick)
+            self._prime_source = GLib.idle_add(self._prime_surface)
 
         def _build_ui(self) -> None:
             root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
@@ -226,6 +232,7 @@ if GTK_AVAILABLE:
             self.drawing_area.set_hexpand(True)
             self.drawing_area.set_vexpand(True)
             self.drawing_area.connect("draw", self._on_draw)
+            self.drawing_area.connect("size-allocate", self._on_size_allocate)
             root.pack_start(self.drawing_area, True, True, 0)
 
             sidebar = Gtk.Box(
@@ -268,8 +275,31 @@ if GTK_AVAILABLE:
             self.speed_value_label.set_xalign(0.0)
             sidebar.pack_start(self.speed_value_label, False, False, 0)
 
+            progress_label = Gtk.Label(label=_("Preview progress"))
+            progress_label.set_xalign(0.0)
+            sidebar.pack_start(progress_label, False, False, 0)
+
+            progress_adjustment = Gtk.Adjustment(
+                value=0.0,
+                lower=0.0,
+                upper=100.0,
+                step_increment=0.1,
+                page_increment=1.0,
+                page_size=0.0,
+            )
+            self.progress_slider = Gtk.Scale(
+                orientation=Gtk.Orientation.HORIZONTAL, adjustment=progress_adjustment
+            )
+            self.progress_slider.set_digits(1)
+            self.progress_slider.connect("value-changed", self._on_progress_slider_changed)
+            sidebar.pack_start(self.progress_slider, False, False, 0)
+
             self.preview_status = Gtk.Label()
             self.preview_status.set_xalign(0.0)
+            self.preview_status.set_width_chars(50)
+            self.preview_status.set_max_width_chars(50)
+            self.preview_status.set_line_wrap(False)
+            self.preview_status.set_ellipsize(Pango.EllipsizeMode.END)
             sidebar.pack_start(self.preview_status, False, False, 0)
 
             sidebar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
@@ -290,11 +320,22 @@ if GTK_AVAILABLE:
 
             self.export_status = Gtk.Label()
             self.export_status.set_xalign(0.0)
+            self.export_status.set_width_chars(50)
+            self.export_status.set_max_width_chars(50)
+            self.export_status.set_line_wrap(False)
+            self.export_status.set_ellipsize(Pango.EllipsizeMode.END)
             sidebar.pack_start(self.export_status, False, False, 0)
 
             self.show_all()
 
         def _toggle_play(self, *_args) -> None:
+            if (
+                not self.playing
+                and self.model.total_length_mm > 0
+                and math.isclose(self.progress_mm, self.model.total_length_mm, abs_tol=1e-6)
+            ):
+                self.progress_mm = 0.0
+                self.drawing_area.queue_draw()
             self.playing = not self.playing
             self.play_button.set_label(_("Pause") if self.playing else _("Play"))
             self.last_tick = time.monotonic()
@@ -305,6 +346,8 @@ if GTK_AVAILABLE:
             self.play_button.set_label(_("Play"))
             self.last_tick = time.monotonic()
             self.drawing_area.queue_draw()
+            self._set_progress_slider_value(0.0)
+            self.preview_status.set_text(_("Preview reset. Press Play to start."))
 
         def _on_speed_changed(self, slider: Gtk.Scale) -> None:
             self.speed_multiplier = slider.get_value()
@@ -371,11 +414,15 @@ if GTK_AVAILABLE:
                 return
 
             self.export_status.set_text(_("Exported to ") + str(out_path))
+            self._surface_dirty = True
 
         def _on_destroy(self, *_args) -> None:
             if self._timeout_id is not None:
                 GLib.source_remove(self._timeout_id)
                 self._timeout_id = None
+            if self._prime_source is not None:
+                GLib.source_remove(self._prime_source)
+                self._prime_source = None
             Gtk.main_quit()
 
         def _tick(self) -> bool:
@@ -401,20 +448,21 @@ if GTK_AVAILABLE:
         def _on_draw(self, widget: Gtk.DrawingArea, cr) -> None:
             width = widget.get_allocated_width()
             height = widget.get_allocated_height()
-            cr.save()
-            cr.set_source_rgb(0.08, 0.08, 0.1)
-            cr.paint()
-            cr.restore()
+            self._ensure_static_surface(width, height)
+            if self._static_surface is None:
+                return
 
-            if not self.model.edges:
+            cr.set_source_surface(self._static_surface, 0, 0)
+            cr.paint()
+
+            if not self.model.edges or self._viewport is None:
                 self.preview_status.set_text(_("Select at least one path to preview."))
                 return
 
-            scale, offset_x, offset_y = self._compute_viewport(width, height)
+            scale, offset_x, offset_y = self._viewport
             cr.translate(offset_x, offset_y)
             cr.scale(scale, scale)
 
-            self._draw_full_path(cr)
             self._draw_progress(cr)
 
             point, needle_down = self.model.point_at(self.progress_mm)
@@ -428,11 +476,72 @@ if GTK_AVAILABLE:
 
             stitched = min(self.progress_mm, self.model.total_length_mm)
             percent = (stitched / self.model.total_length_mm * 100.0) if self.model.total_length_mm else 0.0
+            self._set_progress_slider_value(percent)
             self.preview_status.set_text(
                 _("Path length: {length:.1f} mm   Previewed: {progress:.1f} mm ({pct:.1f}%)").format(
                     length=self.model.total_length_mm, progress=stitched, pct=percent
                 )
             )
+
+        def _ensure_static_surface(self, width: int, height: int) -> None:
+            needs_new = (
+                self._static_surface is None
+                or self._surface_dirty
+                or self._static_surface_size != (width, height)
+            )
+            if not needs_new:
+                return
+
+            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+            ctx = cairo.Context(surface)
+            ctx.set_source_rgb(0.08, 0.08, 0.1)
+            ctx.paint()
+
+            if self.model.edges:
+                viewport = self._compute_viewport(width, height)
+                self._viewport = viewport
+                ctx.translate(viewport[1], viewport[2])
+                ctx.scale(viewport[0], viewport[0])
+                self._draw_full_path(ctx)
+            else:
+                self._viewport = (1.0, 0.0, 0.0)
+
+            self._static_surface = surface
+            self._static_surface_size = (width, height)
+            self._surface_dirty = False
+
+        def _set_progress_slider_value(self, percent: float) -> None:
+            if not hasattr(self, "progress_slider"):
+                return
+            self._updating_progress_slider = True
+            self.progress_slider.set_value(max(0.0, min(100.0, percent)))
+            self._updating_progress_slider = False
+
+        def _on_progress_slider_changed(self, slider: Gtk.Scale) -> None:
+            if self._updating_progress_slider or not self.model.total_length_mm:
+                return
+            percent = slider.get_value()
+            self.progress_mm = (
+                percent / 100.0 * self.model.total_length_mm
+            )
+            self.last_tick = time.monotonic()
+            self.drawing_area.queue_draw()
+
+        def _on_size_allocate(self, widget, allocation) -> None:
+            if self._static_surface_size != (allocation.width, allocation.height):
+                self._surface_dirty = True
+
+        def _prime_surface(self) -> bool:
+            if not self.drawing_area.get_realized():
+                return True
+            width = self.drawing_area.get_allocated_width()
+            height = self.drawing_area.get_allocated_height()
+            if width <= 0 or height <= 0:
+                return True
+            self._ensure_static_surface(width, height)
+            self.drawing_area.queue_draw()
+            self._prime_source = None
+            return False
 
         def _compute_viewport(self, width: int, height: int) -> Tuple[float, float, float]:
             min_x, min_y, max_x, max_y = self.model.bounds
@@ -503,15 +612,10 @@ else:
 
 # Export writers -------------------------------------------------------------
 def _write_txt(model: MotionPathModel, outfile: Path) -> None:
-    segments = model.iter_segments_mm()
-    lines = [
-        "# Quilt motion path export",
-        "# Columns: needle_down,x_mm,y_mm",
-    ]
-    for needle_down, pts in segments:
+    lines: List[str] = []
+    for _, pts in model.iter_segments_mm():
         for x, y in pts:
-            lines.append(f"{1 if needle_down else 0},{x:.4f},{y:.4f}")
-        lines.append("# segment")
+            lines.append(f"{x:.4f} {y:.4f}")
     outfile.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -521,7 +625,12 @@ def _write_plt(model: MotionPathModel, outfile: Path) -> None:
     for needle_down, pts in model.iter_segments_mm():
         if not pts:
             continue
-        hpgl_points = [f"{int(x * units_per_mm)},{int(y * units_per_mm)}" for x, y in pts]
+        hpgl_points = []
+        for x, y in pts:
+            x_c, y_c = _cartesian_coords(model, x, y)
+            hpgl_points.append(
+                f"{int(round(x_c * units_per_mm))},{int(round(y_c * units_per_mm))}"
+            )
         prefix = "PD" if needle_down else "PU"
         commands.append(f"{prefix}{hpgl_points[0]};")
         if len(hpgl_points) > 1:
@@ -555,7 +664,8 @@ def _write_dxf(model: MotionPathModel, outfile: Path) -> None:
             ]
         )
         for x, y in pts:
-            entities.extend(["10", f"{x:.4f}", "20", f"{y:.4f}"])
+            x_c, y_c = _cartesian_coords(model, x, y)
+            entities.extend(["10", f"{x_c:.4f}", "20", f"{y_c:.4f}"])
     content = [
         "0",
         "SECTION",
@@ -591,6 +701,16 @@ def _write_generic_pointset(model: MotionPathModel, outfile: Path, fmt_name: str
     outfile.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _write_hqf(model: MotionPathModel, outfile: Path) -> None:
+    _write_generic_pointset(model, outfile, "HQF")
+
+
+def _cartesian_coords(model: MotionPathModel, x_mm: float, y_mm: float) -> Tuple[float, float]:
+    if model.doc_height_mm is not None:
+        return x_mm, model.doc_height_mm - y_mm
+    return x_mm, -y_mm
+
+
 EXPORT_PROFILES: Dict[str, ExportProfile] = {
     "BQM": ExportProfile(
         title="IntelliQuilter BQM",
@@ -608,7 +728,7 @@ EXPORT_PROFILES: Dict[str, ExportProfile] = {
         title="Handi Quilter HQF",
         extension="hqf",
         description="Handi Quilter format",
-        writer=lambda model, dest: _write_generic_pointset(model, dest, "HQF"),
+        writer=_write_hqf,
     ),
     "IQP": ExportProfile(
         title="IntelliQuilter IQP",
@@ -682,8 +802,26 @@ class QuiltMotionExportExtension(inkex.EffectExtension):
         if not ordered_segments:
             raise inkex.AbortExtension(_("No drawable segments were found."))
 
-        px_to_mm = units.convert_unit("1px", "mm")
-        model = MotionPathModel(ordered_segments, px_to_mm=px_to_mm)
+        try:
+            px_per_mm = self.svg.unittouu("1mm")
+        except Exception:
+            px_per_mm = None
+        if px_per_mm and px_per_mm != 0:
+            px_to_mm = 1.0 / px_per_mm
+        else:
+            px_to_mm = units.convert_unit("1px", "mm")
+
+        doc_height_attr = self.svg.get("height")
+        doc_height_px: Optional[float] = None
+        try:
+            if doc_height_attr:
+                doc_height_px = self.svg.unittouu(doc_height_attr)
+            elif getattr(self.svg, "viewbox_height", None):
+                doc_height_px = float(self.svg.viewbox_height)
+        except Exception:
+            doc_height_px = None
+
+        model = MotionPathModel(ordered_segments, px_to_mm=px_to_mm, doc_height_px=doc_height_px)
         window = QuiltPreviewWindow(model, EXPORT_PROFILES)
         window.present()
         Gtk.main()

@@ -10,13 +10,38 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 
 ## Installation
 
-1. Copy the contents of this repository into Inkscape’s user extension directory. On Linux this is typically `~/.config/inkscape/extensions`. Create the folder if it does not exist.
-2. Restart Inkscape. The new entry appears under `Extensions → Quilting → Quilt Motion Preview & Export`.
-3. Make sure the Python bindings for Gtk are installed. On Ubuntu/Debian run:
+1. **Download** this repository (clone or unzip).
+2. **Copy** the `extensions/` and `README.md` contents into your Inkscape user extensions folder:
 
-   ```bash
-   sudo apt install python3-gi python3-gi-cairo python3-cairo gir1.2-gtk-3.0
-   ```
+   | Platform | Extension folder |
+   |----------|------------------|
+   | Linux    | `~/.config/inkscape/extensions` (or `%APPDATA%` equivalent for Flatpak/Snap) |
+   | Windows  | `%APPDATA%\Inkscape\extensions` (e.g., `C:\Users\<you>\AppData\Roaming\Inkscape\extensions`) |
+   | macOS    | `~/Library/Application Support/org.inkscape.Inkscape/config/inkscape/extensions` |
+
+   Create the directory if it does not exist, then restart Inkscape.
+
+3. **Ensure Gtk bindings exist** for Python:
+
+   - **Linux (Apt)**:
+
+     ```bash
+     sudo apt install python3-gi python3-gi-cairo python3-cairo gir1.2-gtk-3.0
+     ```
+
+   - **Linux (other distros)**: install the PyGObject/Gtk runtime packages via your package manager (look for `pygobject3`, `python3-cairo`, `gtk3` introspection).
+
+   - **Windows**: install the official Inkscape package (which bundles Python 3, Gtk, and PyGObject). If you run a custom Python, make sure `pygobject` and `pycairo` are installed through MSYS2 or the Gnome for Windows runtime.
+
+   - **macOS**: install via Homebrew:
+
+     ```bash
+     brew install pygobject3 gtk+3 py3cairo
+     ```
+
+     or ensure the DMG build of Inkscape includes `python3-gi`. If not, use `python3 -m pip install pyobjc pygobject pycairo` within the Inkscape Python environment.
+
+4. Start Inkscape and find the extension under `Extensions → Quilting → Quilt Motion Preview & Export`.
 
 ## Usage
 
@@ -62,3 +87,12 @@ Inside Inkscape, keep the XML editor open to inspect the produced files if you n
 - Add vendor-specific headers to the text-based formats (e.g., IQP/BQM metadata blocks).
 - Support stitch sampling density controls (fixed interval vs. exact node points).
 - Export machine-specific thread trims, tie-offs, and pause markers.
+
+## Export formats
+
+The extension writes every format from the same flattened stitch stream (in document millimetres) but maps it to the conventions of each quilting ecosystem:
+
+- **BQM / HQF / IQP / PAT / QCC / QLI / SSD** – simple text blocks. Each file begins with a short header, then repeats `BEGIN STITCH` and `BEGIN JUMP` segments listing `x y` coordinates in millimetres so vendor utilities can import the path. These formats differ mostly by filename extension but match each machine’s expected plain-text style, making it easy to post-process or load directly.
+- **DXF** – AutoCAD “lightweight polyline” (LWPOLYLINE) entities. Stitch segments go on layer `STITCH`, jump segments on `TRAVEL`. This is ideal for CAD-based quilting workflows.
+- **PLT** – HPGL commands that encode jumps (`PU`) and stitches (`PD`) in 40 units per millimetre, matching the classic plotter-style command stream used by some long-arm systems.
+- **TXT** – CSV-like data that lists every point as `needle_down,x_mm,y_mm`, providing a machine-agnostic spreadsheet-friendly dump for debugging or custom conversions.

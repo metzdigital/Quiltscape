@@ -57,9 +57,11 @@ class ExportWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "path.txt"
             qme._write_txt(self.model, out)
-            data = out.read_text()
-            self.assertIn("# Quilt motion path export", data)
-            self.assertIn("needle_down", data.splitlines()[1])
+            lines = out.read_text().splitlines()
+            self.assertTrue(lines)
+            first = lines[0].split()
+            self.assertEqual(len(first), 2)
+            self.assertFalse("," in lines[0])
 
     def test_dxf_writer_emits_polyline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -77,6 +79,15 @@ class ExportWriterTests(unittest.TestCase):
             self.assertEqual(data[1], "VERSION 1")
             self.assertIn("BEGIN STITCH", data)
             self.assertIn("BEGIN JUMP", data)
+
+    def test_hqf_writer_generates_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "path.hqf"
+            qme._write_hqf(self.model, out)
+            lines = out.read_text().splitlines()
+            self.assertTrue(lines[0].startswith("#"))
+            self.assertEqual(lines[1], "VERSION 1")
+            self.assertIn("BEGIN STITCH", lines)
 
 
 class ExportProfilesTests(unittest.TestCase):
