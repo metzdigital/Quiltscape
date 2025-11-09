@@ -622,41 +622,46 @@ if GTK_AVAILABLE:
             self.last_tick = time.monotonic()
             self.drawing_area.queue_draw()
 
-        def _pantograph_offsets(self) -> List[Tuple[float, float, int, int]]:
+        def _pantograph_offsets(self) -> List[Tuple[float, float]]:
             width_px = max(self.model.bounds[2] - self.model.bounds[0], 1e-3)
             height_px = max(self.model.bounds[3] - self.model.bounds[1], 1e-3)
             self._pattern_width_px = width_px
             self._pattern_height_px = height_px
             row_spacing_px = max(self.row_distance_mm / self.model.px_to_mm, 1.0)
             stagger_px = width_px * (self.stagger_percent / 100.0) if self.stagger else 0.0
-            offsets: List[Tuple[float, float, int, int]] = []
+
+            if self.model.start_point is not None and self.model.end_point is not None:
+                delta_x = self.model.end_point[0] - self.model.start_point[0]
+                delta_y = self.model.end_point[1] - self.model.start_point[1]
+            else:
+                delta_x = width_px
+                delta_y = 0.0
+
+            offsets: List[Tuple[float, float]] = []
             for row in range(self.row_count):
-                row_dx = stagger_px if (self.stagger and row % 2 == 1) else 0.0
+                base_dx = stagger_px if (self.stagger and row % 2 == 1) else 0.0
                 row_dy = row * row_spacing_px
                 for repeat in range(self.repeat_count):
-                    dx = row_dx + repeat * width_px
-                    dy = row_dy
-                    offsets.append((dx, dy, row, repeat))
+                    dx = base_dx + repeat * delta_x
+                    dy = row_dy + repeat * delta_y
+                    offsets.append((dx, dy))
             return offsets
 
         def _pantograph_bounds(self) -> Tuple[float, float, float, float]:
             min_x, min_y, max_x, max_y = self.model.bounds
-            width_px = max_x - min_x
-            height_px = max_y - min_y
-            row_spacing_px = max(self.row_distance_mm / self.model.px_to_mm, 1.0)
-            stagger_px = width_px * (self.stagger_percent / 100.0) if self.stagger else 0.0
-
-            total_width = width_px * self.repeat_count + (stagger_px if self.stagger else 0.0)
-            total_height = height_px
-            if self.row_count > 1:
-                total_height += (self.row_count - 1) * row_spacing_px
-
-            return (
-                min_x,
-                min_y,
-                min_x + total_width,
-                min_y + total_height,
-            )
+            offsets = self._pantograph_offsets()
+            total_min_x = float("inf")
+            total_min_y = float("inf")
+            total_max_x = float("-inf")
+            total_max_y = float("-inf")
+            for dx, dy in offsets:
+                total_min_x = min(total_min_x, min_x + dx)
+                total_min_y = min(total_min_y, min_y + dy)
+                total_max_x = max(total_max_x, max_x + dx)
+                total_max_y = max(total_max_y, max_y + dy)
+            if not offsets:
+                total_min_x, total_min_y, total_max_x, total_max_y = min_x, min_y, max_x, max_y
+            return (total_min_x, total_min_y, total_max_x, total_max_y)
 
         def _on_size_allocate(self, widget, allocation) -> None:
             if self._static_surface_size != (allocation.width, allocation.height):
@@ -690,9 +695,8 @@ if GTK_AVAILABLE:
             cr.save()
             cr.set_line_width(1.0)
             offsets = self._pantograph_offsets()
-            width_px = getattr(self, "_pattern_width_px", max(self.model.bounds[2] - self.model.bounds[0], 1e-3))
 
-            for dx, dy, row, repeat in offsets:
+            for dx, dy in offsets:
                 cr.save()
                 cr.translate(dx, dy)
                 for seg in self.model.segments:
@@ -705,27 +709,6 @@ if GTK_AVAILABLE:
                         cr.line_to(*pt)
                     cr.stroke()
                 cr.restore()
-
-                if (
-                    repeat > 0
-                    and self.model.start_point is not None
-                    and self.model.end_point is not None
-                ):
-                    prev_end = (
-                        self.model.end_point[0] + dx - width_px,
-                        self.model.end_point[1] + dy,
-                    )
-                    curr_start = (
-                        self.model.start_point[0] + dx,
-                        self.model.start_point[1] + dy,
-                    )
-                    cr.save()
-                    cr.set_source_rgba(0.8, 0.5, 0.2, 0.8)
-                    cr.set_line_width(0.8)
-                    cr.move_to(*prev_end)
-                    cr.line_to(*curr_start)
-                    cr.stroke()
-                    cr.restore()
             cr.restore()
 
         def _draw_progress(self, cr) -> None:
