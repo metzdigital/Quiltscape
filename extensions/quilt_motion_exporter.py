@@ -86,8 +86,10 @@ class MotionPathModel:
         self.doc_height_mm = (doc_height_px * px_to_mm) if doc_height_px else None
         self.edges: List[MotionEdge] = []
         self.total_length_mm = 0.0
+        self.start_point: Optional[Point] = None
+        self.end_point: Optional[Point] = None
 
-        for seg in stitched:
+        for idx, seg in enumerate(stitched):
             pts = seg.points
             for i in range(1, len(pts)):
                 start = pts[i - 1]
@@ -103,6 +105,10 @@ class MotionPathModel:
                 )
                 self.edges.append(edge)
                 self.total_length_mm += length_mm
+
+            if idx == 0:
+                self.start_point = pts[0]
+            self.end_point = pts[-1]
 
         xs = [pt[0] for seg in stitched for pt in seg.points]
         ys = [pt[1] for seg in stitched for pt in seg.points]
@@ -215,6 +221,15 @@ if GTK_AVAILABLE:
             self._prime_source: Optional[int] = None
             self._updating_progress_slider = False
 
+            # Pantograph defaults
+            self.repeat_count = 2
+            self.row_count = 2
+            base_height_px = max(model.bounds[3] - model.bounds[1], 1e-3)
+            self.base_row_distance_mm = base_height_px * model.px_to_mm
+            self.row_distance_mm = self.base_row_distance_mm
+            self.stagger = False
+            self.stagger_percent = 50.0
+
             self._build_ui()
             self.connect("destroy", self._on_destroy)
             self._timeout_id = GLib.timeout_add(16, self._tick)
@@ -304,6 +319,62 @@ if GTK_AVAILABLE:
 
             sidebar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
 
+            pantograph_label = Gtk.Label(label=_("Pantograph layout"))
+            pantograph_label.set_xalign(0.0)
+            sidebar.pack_start(pantograph_label, False, False, 0)
+
+            pantograph_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
+            sidebar.pack_start(pantograph_grid, False, False, 0)
+
+            repeat_spin = Gtk.SpinButton(adjustment=Gtk.Adjustment(2, 1, 20, 1, 2, 0), numeric=True)
+            repeat_spin.set_value(self.repeat_count)
+            repeat_spin.connect("value-changed", self._on_repeat_changed)
+            pantograph_grid.attach(Gtk.Label(label=_("Repeats"), xalign=0), 0, 0, 1, 1)
+            pantograph_grid.attach(repeat_spin, 1, 0, 1, 1)
+            self.repeat_spin = repeat_spin
+
+            rows_spin = Gtk.SpinButton(adjustment=Gtk.Adjustment(2, 1, 20, 1, 2, 0), numeric=True)
+            rows_spin.set_value(self.row_count)
+            rows_spin.connect("value-changed", self._on_rows_changed)
+            pantograph_grid.attach(Gtk.Label(label=_("Rows"), xalign=0), 0, 1, 1, 1)
+            pantograph_grid.attach(rows_spin, 1, 1, 1, 1)
+            self.rows_spin = rows_spin
+
+            distance_adjustment = Gtk.Adjustment(
+                value=self.row_distance_mm,
+                lower=1.0,
+                upper=5000.0,
+                step_increment=1.0,
+                page_increment=10.0,
+                page_size=0.0,
+            )
+            distance_spin = Gtk.SpinButton(adjustment=distance_adjustment, digits=1)
+            distance_spin.connect("value-changed", self._on_row_distance_changed)
+            pantograph_grid.attach(Gtk.Label(label=_("Row distance (mm)"), xalign=0), 0, 2, 1, 1)
+            pantograph_grid.attach(distance_spin, 1, 2, 1, 1)
+            self.row_distance_spin = distance_spin
+
+            stagger_toggle = Gtk.CheckButton(label=_("Stagger alternate rows"))
+            stagger_toggle.set_active(self.stagger)
+            stagger_toggle.connect("toggled", self._on_stagger_toggled)
+            pantograph_grid.attach(stagger_toggle, 0, 3, 2, 1)
+            self.stagger_toggle = stagger_toggle
+
+            stagger_adjustment = Gtk.Adjustment(
+                value=self.stagger_percent,
+                lower=0.0,
+                upper=100.0,
+                step_increment=1.0,
+                page_increment=10.0,
+                page_size=0.0,
+            )
+            stagger_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=stagger_adjustment)
+            stagger_scale.set_digits(0)
+            stagger_scale.connect("value-changed", self._on_stagger_percent_changed)
+            pantograph_grid.attach(Gtk.Label(label=_("Stagger %"), xalign=0), 0, 4, 1, 1)
+            pantograph_grid.attach(stagger_scale, 1, 4, 1, 1)
+            self.stagger_scale = stagger_scale
+
             export_label = Gtk.Label(label=_("Export format"))
             export_label.set_xalign(0.0)
             sidebar.pack_start(export_label, False, False, 0)
@@ -348,10 +419,31 @@ if GTK_AVAILABLE:
             self.drawing_area.queue_draw()
             self._set_progress_slider_value(0.0)
             self.preview_status.set_text(_("Preview reset. Press Play to start."))
+            self._surface_dirty = True
 
         def _on_speed_changed(self, slider: Gtk.Scale) -> None:
             self.speed_multiplier = slider.get_value()
             self.speed_value_label.set_label(f"{self.speed_multiplier:.2f}×")
+        def _on_repeat_changed(self, spin: Gtk.SpinButton) -> None:
+            self.repeat_count = max(1, int(spin.get_value()))
+            self._invalidate_surface()
+
+        def _on_rows_changed(self, spin: Gtk.SpinButton) -> None:
+            self.row_count = max(1, int(spin.get_value()))
+            self._invalidate_surface()
+
+        def _on_row_distance_changed(self, spin: Gtk.SpinButton) -> None:
+            self.row_distance_mm = max(1.0, spin.get_value())
+            self._invalidate_surface()
+
+        def _on_stagger_toggled(self, button: Gtk.CheckButton) -> None:
+            self.stagger = button.get_active()
+            self._invalidate_surface()
+
+        def _on_stagger_percent_changed(self, scale: Gtk.Scale) -> None:
+            self.stagger_percent = scale.get_value()
+            if self.stagger:
+                self._invalidate_surface()
 
         def _export(self, *_args) -> None:
             active = self.format_combo.get_active()
@@ -415,6 +507,9 @@ if GTK_AVAILABLE:
 
             self.export_status.set_text(_("Exported to ") + str(out_path))
             self._surface_dirty = True
+        def _invalidate_surface(self) -> None:
+            self._surface_dirty = True
+            self.drawing_area.queue_draw()
 
         def _on_destroy(self, *_args) -> None:
             if self._timeout_id is not None:
@@ -468,7 +563,7 @@ if GTK_AVAILABLE:
             point, needle_down = self.model.point_at(self.progress_mm)
             cr.save()
             cr.translate(point[0], point[1])
-            cr.set_source_rgba(0.99, 0.71, 0.2, 1.0 if needle_down else 0.6)
+            cr.set_source_rgba(0.9, 0.2, 0.2, 1.0 if needle_down else 0.7)
             radius = 4.0 / scale
             cr.arc(0, 0, radius, 0, math.tau)
             cr.fill()
@@ -494,7 +589,7 @@ if GTK_AVAILABLE:
 
             surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
             ctx = cairo.Context(surface)
-            ctx.set_source_rgb(0.08, 0.08, 0.1)
+            ctx.set_source_rgb(0.98, 0.98, 0.98)
             ctx.paint()
 
             if self.model.edges:
@@ -502,7 +597,7 @@ if GTK_AVAILABLE:
                 self._viewport = viewport
                 ctx.translate(viewport[1], viewport[2])
                 ctx.scale(viewport[0], viewport[0])
-                self._draw_full_path(ctx)
+                self._draw_full_pattern(ctx)
             else:
                 self._viewport = (1.0, 0.0, 0.0)
 
@@ -527,6 +622,42 @@ if GTK_AVAILABLE:
             self.last_tick = time.monotonic()
             self.drawing_area.queue_draw()
 
+        def _pantograph_offsets(self) -> List[Tuple[float, float, int, int]]:
+            width_px = max(self.model.bounds[2] - self.model.bounds[0], 1e-3)
+            height_px = max(self.model.bounds[3] - self.model.bounds[1], 1e-3)
+            self._pattern_width_px = width_px
+            self._pattern_height_px = height_px
+            row_spacing_px = max(self.row_distance_mm / self.model.px_to_mm, 1.0)
+            stagger_px = width_px * (self.stagger_percent / 100.0) if self.stagger else 0.0
+            offsets: List[Tuple[float, float, int, int]] = []
+            for row in range(self.row_count):
+                row_dx = stagger_px if (self.stagger and row % 2 == 1) else 0.0
+                row_dy = row * row_spacing_px
+                for repeat in range(self.repeat_count):
+                    dx = row_dx + repeat * width_px
+                    dy = row_dy
+                    offsets.append((dx, dy, row, repeat))
+            return offsets
+
+        def _pantograph_bounds(self) -> Tuple[float, float, float, float]:
+            min_x, min_y, max_x, max_y = self.model.bounds
+            width_px = max_x - min_x
+            height_px = max_y - min_y
+            row_spacing_px = max(self.row_distance_mm / self.model.px_to_mm, 1.0)
+            stagger_px = width_px * (self.stagger_percent / 100.0) if self.stagger else 0.0
+
+            total_width = width_px * self.repeat_count + (stagger_px if self.stagger else 0.0)
+            total_height = height_px
+            if self.row_count > 1:
+                total_height += (self.row_count - 1) * row_spacing_px
+
+            return (
+                min_x,
+                min_y,
+                min_x + total_width,
+                min_y + total_height,
+            )
+
         def _on_size_allocate(self, widget, allocation) -> None:
             if self._static_surface_size != (allocation.width, allocation.height):
                 self._surface_dirty = True
@@ -544,7 +675,7 @@ if GTK_AVAILABLE:
             return False
 
         def _compute_viewport(self, width: int, height: int) -> Tuple[float, float, float]:
-            min_x, min_y, max_x, max_y = self.model.bounds
+            min_x, min_y, max_x, max_y = self._pantograph_bounds()
             margin = 0.05
             span_x = max(max_x - min_x, 1e-3)
             span_y = max(max_y - min_y, 1e-3)
@@ -555,17 +686,46 @@ if GTK_AVAILABLE:
             offset_y = (height - span_y * scale) / 2.0 - min_y * scale
             return scale, offset_x, offset_y
 
-        def _draw_full_path(self, cr) -> None:
+        def _draw_full_pattern(self, cr) -> None:
             cr.save()
             cr.set_line_width(1.0)
-            for seg in self.model.segments:
-                cr.set_source_rgba(0.35, 0.4, 0.55, 0.35 if seg.needle_down else 0.18)
-                cr.new_path()
-                pts = seg.points
-                cr.move_to(*pts[0])
-                for pt in pts[1:]:
-                    cr.line_to(*pt)
-                cr.stroke()
+            offsets = self._pantograph_offsets()
+            width_px = getattr(self, "_pattern_width_px", max(self.model.bounds[2] - self.model.bounds[0], 1e-3))
+
+            for dx, dy, row, repeat in offsets:
+                cr.save()
+                cr.translate(dx, dy)
+                for seg in self.model.segments:
+                    color = (0.2, 0.4, 0.7, 0.7) if seg.needle_down else (0.7, 0.7, 0.7, 0.4)
+                    cr.set_source_rgba(*color)
+                    cr.new_path()
+                    pts = seg.points
+                    cr.move_to(*pts[0])
+                    for pt in pts[1:]:
+                        cr.line_to(*pt)
+                    cr.stroke()
+                cr.restore()
+
+                if (
+                    repeat > 0
+                    and self.model.start_point is not None
+                    and self.model.end_point is not None
+                ):
+                    prev_end = (
+                        self.model.end_point[0] + dx - width_px,
+                        self.model.end_point[1] + dy,
+                    )
+                    curr_start = (
+                        self.model.start_point[0] + dx,
+                        self.model.start_point[1] + dy,
+                    )
+                    cr.save()
+                    cr.set_source_rgba(0.8, 0.5, 0.2, 0.8)
+                    cr.set_line_width(0.8)
+                    cr.move_to(*prev_end)
+                    cr.line_to(*curr_start)
+                    cr.stroke()
+                    cr.restore()
             cr.restore()
 
         def _draw_progress(self, cr) -> None:
@@ -590,10 +750,10 @@ if GTK_AVAILABLE:
                     )
 
                 cr.set_source_rgba(
-                    0.96 if edge.needle_down else 0.65,
-                    0.48 if edge.needle_down else 0.65,
-                    0.2 if edge.needle_down else 0.65,
-                    0.95 if edge.needle_down else 0.6,
+                    0.1 if edge.needle_down else 0.5,
+                    0.55 if edge.needle_down else 0.5,
+                    0.85 if edge.needle_down else 0.5,
+                    0.9 if edge.needle_down else 0.5,
                 )
                 cr.move_to(*start)
                 cr.line_to(*end)
