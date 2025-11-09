@@ -326,14 +326,34 @@ if GTK_AVAILABLE:
             pantograph_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
             sidebar.pack_start(pantograph_grid, False, False, 0)
 
-            repeat_spin = Gtk.SpinButton(adjustment=Gtk.Adjustment(2, 1, 20, 1, 2, 0), numeric=True)
+            repeat_spin = Gtk.SpinButton(
+                adjustment=Gtk.Adjustment(
+                    value=2,
+                    lower=1,
+                    upper=20,
+                    step_increment=1,
+                    page_increment=2,
+                    page_size=0,
+                ),
+                numeric=True,
+            )
             repeat_spin.set_value(self.repeat_count)
             repeat_spin.connect("value-changed", self._on_repeat_changed)
             pantograph_grid.attach(Gtk.Label(label=_("Repeats"), xalign=0), 0, 0, 1, 1)
             pantograph_grid.attach(repeat_spin, 1, 0, 1, 1)
             self.repeat_spin = repeat_spin
 
-            rows_spin = Gtk.SpinButton(adjustment=Gtk.Adjustment(2, 1, 20, 1, 2, 0), numeric=True)
+            rows_spin = Gtk.SpinButton(
+                adjustment=Gtk.Adjustment(
+                    value=2,
+                    lower=1,
+                    upper=20,
+                    step_increment=1,
+                    page_increment=2,
+                    page_size=0,
+                ),
+                numeric=True,
+            )
             rows_spin.set_value(self.row_count)
             rows_spin.connect("value-changed", self._on_rows_changed)
             pantograph_grid.attach(Gtk.Label(label=_("Rows"), xalign=0), 0, 1, 1, 1)
