@@ -846,7 +846,7 @@ def _write_gif(model: MotionPathModel, outfile: Path) -> None:
     for seg in model.segments:
         pts = [transform(pt) for pt in seg.points]
         base_paths.append(pts)
-        stroke_colors.append("#4a7bc6" if seg.needle_down else "#c4c4c4")
+        stroke_colors.append("#008080" if seg.needle_down else "#f4a1a1")
 
     frames: List[Image.Image] = []
     for idx in range(frame_count):
@@ -880,7 +880,7 @@ def _write_gif(model: MotionPathModel, outfile: Path) -> None:
             else:
                 end_pt = transform(edge.end_px)
 
-            draw.line([start_pt, end_pt], fill="#00bcd4", width=3)
+            draw.line([start_pt, end_pt], fill="#003c83", width=3)
 
             if length_remaining < edge.length_mm:
                 break
