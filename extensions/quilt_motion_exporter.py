@@ -721,7 +721,7 @@ if GTK_AVAILABLE:
                 cr.save()
                 cr.translate(dx, dy)
                 for seg in self.model.segments:
-                    color = (0.2, 0.4, 0.7, 0.7) if seg.needle_down else (0.7, 0.7, 0.7, 0.4)
+                    color = (0.2, 0.4, 0.7, 0.7) if seg.needle_down else (0.85, 0.2, 0.2, 0.8)
                     cr.set_source_rgba(*color)
                     cr.new_path()
                     pts = seg.points
@@ -753,12 +753,10 @@ if GTK_AVAILABLE:
                         edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * ratio,
                     )
 
-                cr.set_source_rgba(
-                    0.1 if edge.needle_down else 0.5,
-                    0.55 if edge.needle_down else 0.5,
-                    0.85 if edge.needle_down else 0.5,
-                    0.9 if edge.needle_down else 0.5,
-                )
+                if edge.needle_down:
+                    cr.set_source_rgba(0.1, 0.55, 0.85, 0.9)
+                else:
+                    cr.set_source_rgba(0.9, 0.25, 0.25, 0.9)
                 cr.move_to(*start)
                 cr.line_to(*end)
                 cr.stroke()
