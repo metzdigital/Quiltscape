@@ -2,11 +2,6 @@
 <inkscape-extension xmlns="http://www.inkscape.org/namespace/inkscape/extension">
   <name>Quilt Motion Preview &amp; Export</name>
   <id>bcmetz.quilt.motion.exporter</id>
-  <param name="instructions" type="description">
-    Select the path objects you would like to stitch. Click Apply to open the
-    realtime motion preview window, then play the animation and export to the
-    available longarm formats.
-  </param>
   <effect needs-live-preview="false">
     <object-type>path</object-type>
     <effects-menu>

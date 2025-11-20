@@ -48,13 +48,15 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 
 1. Draw your quilting motion path in Inkscape. Combine multiple paths if you need complex patterns—the extension respects the original draw/stacking order.
 2. Select the path objects you want to export.
-3. Open `Extensions → Quilting → Quilt Motion Preview & Export` and click **Apply**.
+3. Open `Extensions → Quilting → Quilt Motion Preview & Export`. The preview window opens immediately using your current selection—no extra “Apply” click required.
 4. Use the preview window:
    - **Play/Pause/Restart** control the animation, while the **Preview speed** slider changes draw speed.
    - Drag the **Progress** slider to jump to any point along the stitch path.
    - Adjust the **Pantograph layout** panel to tile the design into repeated rows (control repeats, rows, row distance in mm, stagger toggle, stagger percent). The preview updates instantly to show the full pantograph layout.
    - Pick an export format and press **Export…** to write a file (DXF for machine import, Animated GIF for sharing/preview).
 5. The exported files list every stitch (and jump) in document millimetres. They can be loaded directly by many quilting systems or passed through manufacturer tooling if post-processing is required.
+
+> **Tip:** The extension runs immediately, so make sure your intended motion paths are selected before launching it. If nothing is selected, Inkscape shows an alert reminding you to pick paths first.
 
 ### Snap sandbox note
 

@@ -118,6 +118,45 @@ class MotionPathModel:
         else:
             self.bounds = (0.0, 0.0, 1.0, 1.0)
 
+        self._refine_edges()
+
+    def _refine_edges(self) -> None:
+        if not self.edges:
+            return
+        span_x = self.bounds[2] - self.bounds[0]
+        span_y = self.bounds[3] - self.bounds[1]
+        span_px = max(span_x, span_y)
+        if span_px <= 0:
+            return
+        target_px = max(span_px / 400.0, 0.5)
+        target_mm = target_px * self.px_to_mm
+        if target_mm <= 0:
+            return
+
+        new_edges: List[MotionEdge] = []
+        total = 0.0
+        for edge in self.edges:
+            segments = max(1, int(math.ceil(edge.length_mm / target_mm)))
+            for i in range(segments):
+                t0 = i / segments
+                t1 = (i + 1) / segments
+                start = (
+                    edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * t0,
+                    edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * t0,
+                )
+                end = (
+                    edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * t1,
+                    edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * t1,
+                )
+                seg_len = edge.length_mm * (t1 - t0)
+                new_edges.append(
+                    MotionEdge(start_px=start, end_px=end, needle_down=edge.needle_down, start_length_mm=total, length_mm=seg_len)
+                )
+                total += seg_len
+
+        self.edges = new_edges
+        self.total_length_mm = total
+
     def iter_segments_mm(self) -> List[Tuple[bool, List[Point]]]:
         """Return the motion path as absolute millimetre coordinates."""
         factor = self.px_to_mm
@@ -684,6 +723,16 @@ if GTK_AVAILABLE:
                 total_min_x, total_min_y, total_max_x, total_max_y = min_x, min_y, max_x, max_y
             return (total_min_x, total_min_y, total_max_x, total_max_y)
 
+        def _stroke_width(self) -> float:
+            span = max(
+                self.model.bounds[2] - self.model.bounds[0],
+                self.model.bounds[3] - self.model.bounds[1],
+            )
+            if span <= 0:
+                return 1.0
+            width = (span / 300.0) ** 0.7  # slightly heavier scaling for large layouts
+            return max(min(width, 10.0), 0.08)
+
         def _on_size_allocate(self, widget, allocation) -> None:
             if self._static_surface_size != (allocation.width, allocation.height):
                 self._surface_dirty = True
@@ -714,7 +763,7 @@ if GTK_AVAILABLE:
 
         def _draw_full_pattern(self, cr) -> None:
             cr.save()
-            cr.set_line_width(1.0)
+            cr.set_line_width(self._stroke_width())
             offsets = self._pantograph_offsets()
 
             for dx, dy in offsets:
@@ -734,7 +783,7 @@ if GTK_AVAILABLE:
 
         def _draw_progress(self, cr) -> None:
             cr.save()
-            cr.set_line_width(2.0)
+            cr.set_line_width(self._stroke_width() * 1.8)
             remaining = self.progress_mm
 
             for edge in self.model.edges:
@@ -945,6 +994,14 @@ class QuiltMotionExportExtension(inkex.EffectExtension):
             raise inkex.AbortExtension(_("Please select at least one path."))
 
         tolerance = 0.4
+        try:
+            bbox = selection.bounding_box()
+        except Exception:
+            bbox = None
+        if bbox is not None:
+            major = max(bbox.width, bbox.height)
+            if major and major > 0:
+                tolerance = max(min(major / 500.0, 0.4), 0.02)
         ordered_segments: List[MotionSegment] = []
         for elem in selection.values():
             ordered_segments.extend(_flatten_path_element(elem, tolerance=tolerance))
