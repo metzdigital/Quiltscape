@@ -53,16 +53,6 @@ class ExportWriterTests(unittest.TestCase):
         ]
         self.model = qme.MotionPathModel(segments, px_to_mm=px_to_mm)
 
-    def test_text_writer_contains_columns(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "path.txt"
-            qme._write_txt(self.model, out)
-            lines = out.read_text().splitlines()
-            self.assertTrue(lines)
-            first = lines[0].split()
-            self.assertEqual(len(first), 2)
-            self.assertFalse("," in lines[0])
-
     def test_dxf_writer_emits_polyline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "path.dxf"
@@ -71,28 +61,18 @@ class ExportWriterTests(unittest.TestCase):
             self.assertIn("LWPOLYLINE", data)
             self.assertIn("STITCH", data)
 
-    def test_generic_pointset_writer_includes_sections(self) -> None:
+    def test_gif_writer_generates_animation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "path.bqm"
-            qme._write_generic_pointset(self.model, out, "BQM")
-            data = out.read_text().splitlines()
-            self.assertEqual(data[1], "VERSION 1")
-            self.assertIn("BEGIN STITCH", data)
-            self.assertIn("BEGIN JUMP", data)
-
-    def test_hqf_writer_generates_header(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "path.hqf"
-            qme._write_hqf(self.model, out)
-            lines = out.read_text().splitlines()
-            self.assertTrue(lines[0].startswith("#"))
-            self.assertEqual(lines[1], "VERSION 1")
-            self.assertIn("BEGIN STITCH", lines)
+            out = Path(tmp) / "path.gif"
+            qme._write_gif(self.model, out)
+            data = out.read_bytes()
+            self.assertTrue(data.startswith(b"GIF"))
+            self.assertGreater(len(data), 100)
 
 
 class ExportProfilesTests(unittest.TestCase):
     def test_all_required_formats_registered(self) -> None:
-        required = {"BQM", "DXF", "HQF", "IQP", "PAT", "PLT", "QCC", "QLI", "SSD", "TXT"}
+        required = {"DXF", "GIF"}
         self.assertTrue(required.issubset(set(qme.EXPORT_PROFILES.keys())))
 
 

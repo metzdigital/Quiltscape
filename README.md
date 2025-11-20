@@ -5,7 +5,7 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 - Preserve the draw order of the selected paths and animate them with play/pause/restart plus adjustable speed.
 - Scrub through the design with a progress slider to inspect any stitch in context.
 - Visualize the pattern as a multi-row pantograph (repeat count, rows, row spacing, stagger toggle, stagger percent) with a light-themed GTK preview.
-- Export the resulting motion path to several quilting machine formats (BQM, DXF, HQF, IQP, PAT, PLT, QCC, QLI, SSD, TXT), all in millimetres.
+- Export the resulting motion path as either a millimetre-true DXF polyline (machine-ready) or an animated GIF of the stitching motion—pick whichever fits your workflow.
 
 > **Note:** The machine formats included here rely on open, text-based encodings of the stitch path. Every format is generated from the same normalized point stream, so the files remain easy to post-process with vendor-provided converters if needed.
 
@@ -53,7 +53,7 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
    - **Play/Pause/Restart** control the animation, while the **Preview speed** slider changes draw speed.
    - Drag the **Progress** slider to jump to any point along the stitch path.
    - Adjust the **Pantograph layout** panel to tile the design into repeated rows (control repeats, rows, row distance in mm, stagger toggle, stagger percent). The preview updates instantly to show the full pantograph layout.
-   - Pick an export format and press **Export…** to write a file (exports remain a single pattern so you can tile downstream as needed).
+   - Pick an export format and press **Export…** to write a file (DXF for machine import, Animated GIF for sharing/preview).
 5. The exported files list every stitch (and jump) in document millimetres. They can be loaded directly by many quilting systems or passed through manufacturer tooling if post-processing is required.
 
 ### Snap sandbox note
@@ -92,9 +92,5 @@ Inside Inkscape, keep the XML editor open to inspect the produced files if you n
 
 ## Export formats
 
-The extension writes every format from the same flattened stitch stream (in document millimetres) but maps it to the conventions of each quilting ecosystem:
-
-- **BQM / HQF / IQP / PAT / QCC / QLI / SSD** – simple text blocks. Each file begins with a short header, then repeats `BEGIN STITCH` and `BEGIN JUMP` segments listing `x y` coordinates in millimetres so vendor utilities can import the path. These formats differ mostly by filename extension but match each machine’s expected plain-text style, making it easy to post-process or load directly.
-- **DXF** – AutoCAD “lightweight polyline” (LWPOLYLINE) entities. Stitch segments go on layer `STITCH`, jump segments on `TRAVEL`. This is ideal for CAD-based quilting workflows.
-- **PLT** – HPGL commands that encode jumps (`PU`) and stitches (`PD`) in 40 units per millimetre, matching the classic plotter-style command stream used by some long-arm systems.
-- **TXT** – Plain text list of `x y` millimetre pairs (one per line) for quick inspection, spreadsheet import, or conversion scripts.
+- **DXF** – AutoCAD “lightweight polyline” entities. Stitch segments go on layer `STITCH`, jump segments on `TRAVEL`, and all coordinates are exported in millimetres to match your Inkscape document.
+- **Animated GIF** – A shareable preview of the motion path. The extension redraws the path over ~60 frames (using the same light theme as the preview) and shows the stitch head progressing along the pattern, making it easy to review or send to clients without requiring their quilting software.
