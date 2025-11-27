@@ -1496,7 +1496,19 @@ if GTK_AVAILABLE:
         def _build_export_model(self) -> MotionPathModel:
             """Return a MotionPathModel representing the full layout."""
             layout_bounds = self._layout_bounds()
-            offsets = self._pantograph_offsets()
+            raw_offsets = self._pantograph_offsets()
+            # Switchback ordering: alternate direction every row.
+            offsets_by_row: Dict[int, List[Tuple[float, float]]] = {}
+            for row_idx, dx, dy in raw_offsets:
+                offsets_by_row.setdefault(row_idx, []).append((dx, dy))
+            offsets: List[Tuple[int, float, float]] = []
+            for row_idx in sorted(offsets_by_row.keys()):
+                entries = sorted(offsets_by_row[row_idx], key=lambda v: v[0])
+                if row_idx % 2 == 1:
+                    entries.reverse()
+                for dx, dy in entries:
+                    offsets.append((row_idx, dx, dy))
+
             stitched_segments: List[MotionSegment] = []
             last_end: Optional[Point] = None
 
@@ -1548,7 +1560,8 @@ if GTK_AVAILABLE:
                 return clipped
 
             for row_idx, dx, dy in offsets:
-                mirror_row_h = self.mirror_alternate_rows and (row_idx % 2 == 1)
+                # Switchback export: odd rows traverse right-to-left and are mirrored horizontally.
+                mirror_row_h = (row_idx % 2 == 1) or (self.mirror_alternate_rows and (row_idx % 2 == 1))
                 mirror_row_v = self.mirror_alternate_rows_vertical and (row_idx % 2 == 1)
                 for seg in self.model.segments:
                     pts: List[Point] = []
@@ -1561,7 +1574,8 @@ if GTK_AVAILABLE:
                     if len(pts) < 2:
                         continue
                     if last_end is not None and not _close_enough(last_end, pts[0]):
-                        stitched_segments.append(MotionSegment(points=[last_end, pts[0]], needle_down=False))
+                        # Switchback export keeps stitching between rows; connect with needle down.
+                        stitched_segments.append(MotionSegment(points=[last_end, pts[0]], needle_down=True))
                     stitched_segments.append(MotionSegment(points=pts, needle_down=seg.needle_down))
                     last_end = pts[-1]
 
