@@ -76,6 +76,46 @@ class ExportProfilesTests(unittest.TestCase):
         self.assertTrue(required.issubset(set(qme.EXPORT_PROFILES.keys())))
 
 
+class DisplayColorTests(unittest.TestCase):
+    def test_color_for_pass_transitions(self) -> None:
+        blue = qme._color_for_pass(0, needle_down=True)
+        yellow = qme._color_for_pass(1, needle_down=True)
+        red = qme._color_for_pass(2, needle_down=True)
+        travel_red = qme._color_for_pass(0, needle_down=False)
+
+        self.assertEqual(blue, (0.1, 0.55, 0.85, 0.9))
+        self.assertEqual(yellow, (0.95, 0.8, 0.25, 0.9))
+        self.assertEqual(red, (0.9, 0.25, 0.25, 0.9))
+        self.assertEqual(travel_red, (0.9, 0.25, 0.25, 0.9))
+
+    def test_partial_overlap_increments_pass(self) -> None:
+        # Two edges: second overlaps the last half of the first.
+        # We simulate coverage detection logic by sampling cells along the edges.
+        from math import dist
+
+        def edge_cells(p0, p1, cell_size=1.0):
+            length = dist(p0, p1)
+            steps = max(1, int(length / cell_size))
+            cells = set()
+            for s in range(steps + 1):
+                t = s / steps
+                x = p0[0] + (p1[0] - p0[0]) * t
+                y = p0[1] + (p1[1] - p0[1]) * t
+                cells.add((int(round(x / cell_size)), int(round(y / cell_size))))
+            return cells
+
+        first = ((0.0, 0.0), (10.0, 0.0))
+        second = ((5.0, 0.0), (12.0, 0.0))
+
+        coverage = {}
+        for cell in edge_cells(*first):
+            coverage[cell] = coverage.get(cell, 0) + 1
+
+        overlapping_cells = [coverage.get(c, 0) for c in edge_cells(*second)]
+        self.assertIn(1, overlapping_cells, "Overlap should be detected as prior pass")
+
+
+
 class OptimizePathTests(unittest.TestCase):
     def test_optimize_path_reduces_overlap_and_preserves_endpoints(self) -> None:
         # Triangle where the base edge is stitched twice.

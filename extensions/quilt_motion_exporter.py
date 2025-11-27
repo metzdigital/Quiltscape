@@ -998,6 +998,8 @@ if GTK_AVAILABLE:
             self._set_progress_slider_value(0.0)
             self.preview_status.set_text(_("Preview reset. Press Play to start."))
             self._surface_dirty = True
+            if hasattr(self, "_edge_progress"):
+                self._edge_progress = {}
 
         def _optimize_path(self, *_args) -> None:
             if not self.model.segments:
@@ -1346,31 +1348,67 @@ if GTK_AVAILABLE:
             cr.set_line_width(self._stroke_width() * 1.8)
             remaining = self.progress_mm
 
-            for edge in self.model.edges:
+            def _edge_key(a: Point, b: Point) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+                p0 = (round(a[0], 6), round(a[1], 6))
+                p1 = (round(b[0], 6), round(b[1], 6))
+                return (p0, p1) if p0 <= p1 else (p1, p0)
+
+            # Track stitched length per edge for the current progress position.
+            edge_progress: Dict[Tuple[Tuple[float, float], Tuple[float, float]], float] = {}
+
+            def _subdivide_and_draw(edge: MotionEdge) -> bool:
                 if remaining <= edge.start_length_mm:
-                    continue
-                start = edge.start_px
-                end = edge.end_px
+                    return True
                 length_remaining = min(remaining - edge.start_length_mm, edge.length_mm)
                 if length_remaining <= 0:
-                    continue
+                    return True
+                key = _edge_key(edge.start_px, edge.end_px)
+                stitched_before = edge_progress.get(key, 0.0)
 
-                if length_remaining < edge.length_mm:
-                    ratio = length_remaining / edge.length_mm if edge.length_mm else 0.0
-                    end = (
-                        edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * ratio,
-                        edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * ratio,
+                # Subdivide the edge into up to 12 chunks (more responsive color for longer edges).
+                chunks = max(1, min(12, int(math.ceil(edge.length_mm / max(edge.length_mm / 5.0, 1e-6)))))
+                chunk_len = edge.length_mm / chunks if chunks else edge.length_mm
+
+                for i in range(chunks):
+                    seg_start_mm = i * chunk_len
+                    seg_draw_mm = min(chunk_len, max(0.0, length_remaining - seg_start_mm))
+                    if seg_draw_mm <= 0:
+                        continue
+                    t0 = (seg_start_mm) / edge.length_mm if edge.length_mm else 0.0
+                    t1 = (seg_start_mm + seg_draw_mm) / edge.length_mm if edge.length_mm else 0.0
+                    t0 = max(0.0, min(1.0, t0))
+                    t1 = max(0.0, min(1.0, t1))
+                    seg_start = (
+                        edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * t0,
+                        edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * t0,
+                    )
+                    seg_end = (
+                        edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * t1,
+                        edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * t1,
                     )
 
-                if edge.needle_down:
-                    cr.set_source_rgba(0.1, 0.55, 0.85, 0.9)
-                else:
-                    cr.set_source_rgba(0.9, 0.25, 0.25, 0.9)
-                cr.move_to(*start)
-                cr.line_to(*end)
-                cr.stroke()
+                    passes_completed = int(stitched_before / edge.length_mm + 1e-9)
+                    cr.set_source_rgba(*_color_for_pass(passes_completed, edge.needle_down))
 
-                if length_remaining < edge.length_mm:
+                    cr.move_to(*seg_start)
+                    cr.line_to(*seg_end)
+                    cr.stroke()
+
+                    stitched_before += seg_draw_mm
+
+                    # If we haven't finished this edge, stop drawing further edges.
+                    if seg_draw_mm + seg_start_mm + 1e-9 < length_remaining:
+                        continue
+                    if length_remaining + 1e-9 < edge.length_mm:
+                        edge_progress[key] = stitched_before
+                        return False
+
+                edge_progress[key] = stitched_before
+
+                return True
+
+            for edge in self.model.edges:
+                if not _subdivide_and_draw(edge):
                     break
 
             cr.restore()
@@ -1516,6 +1554,17 @@ def _cartesian_coords(model: MotionPathModel, x_mm: float, y_mm: float) -> Tuple
     if model.doc_height_mm is not None:
         return x_mm, model.doc_height_mm - y_mm
     return x_mm, -y_mm
+
+
+def _color_for_pass(passes_completed: int, needle_down: bool) -> Tuple[float, float, float, float]:
+    """Return RGBA for a given pass count and stitch state."""
+    if not needle_down:
+        return (0.9, 0.25, 0.25, 0.9)
+    if passes_completed <= 0:
+        return (0.1, 0.55, 0.85, 0.9)  # blue first pass
+    if passes_completed == 1:
+        return (0.95, 0.8, 0.25, 0.9)  # yellow second pass
+    return (0.9, 0.25, 0.25, 0.9)  # red 3+ passes
 
 
 EXPORT_PROFILES: Dict[str, ExportProfile] = {
