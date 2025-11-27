@@ -782,8 +782,10 @@ if GTK_AVAILABLE:
             self.row_distance_mm = self.base_row_distance_mm
             self.stagger = False
             self.stagger_percent = 50.0
+            self._y_mismatch = False
 
             self._build_ui()
+            self._refresh_y_warning()
             self.connect("destroy", self._on_destroy)
             self._timeout_id = GLib.timeout_add(16, self._tick)
             self._prime_source = GLib.idle_add(self._prime_surface)
@@ -796,12 +798,22 @@ if GTK_AVAILABLE:
             root.set_margin_end(12)
             self.add(root)
 
+            left_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            left_column.set_hexpand(True)
+            left_column.set_vexpand(True)
+            root.pack_start(left_column, True, True, 0)
+
             self.drawing_area = Gtk.DrawingArea()
             self.drawing_area.set_hexpand(True)
             self.drawing_area.set_vexpand(True)
             self.drawing_area.connect("draw", self._on_draw)
             self.drawing_area.connect("size-allocate", self._on_size_allocate)
-            root.pack_start(self.drawing_area, True, True, 0)
+            left_column.pack_start(self.drawing_area, True, True, 0)
+
+            self.y_warning_label = Gtk.Label()
+            self.y_warning_label.set_xalign(0.0)
+            self.y_warning_label.set_use_markup(True)
+            left_column.pack_start(self.y_warning_label, False, False, 0)
 
             sidebar = Gtk.Box(
                 orientation=Gtk.Orientation.VERTICAL, spacing=8
@@ -1034,6 +1046,7 @@ if GTK_AVAILABLE:
             if hasattr(self, "row_distance_spin"):
                 adjustment = self.row_distance_spin.get_adjustment()
                 adjustment.set_value(self.row_distance_mm)
+            self._refresh_y_warning()
 
             self.progress_mm = 0.0
             self.playing = False
@@ -1181,6 +1194,26 @@ if GTK_AVAILABLE:
             cr.scale(scale, scale)
 
             self._draw_progress(cr)
+
+            if self._y_mismatch and self.model.start_point is not None:
+                cr.save()
+                cr.translate(self.model.start_point[0], self.model.start_point[1])
+                cr.set_source_rgba(0.8, 0.62, 0.06, 1.0)
+                cr.set_line_width((self._stroke_width() * 10.0) / scale)
+                radius = 9.0 / scale
+                cr.arc(0, 0, radius, 0, math.tau)
+                cr.stroke()
+                cr.restore()
+
+            if self._y_mismatch and self.model.end_point is not None:
+                cr.save()
+                cr.translate(self.model.end_point[0], self.model.end_point[1])
+                cr.set_source_rgba(0.8, 0.62, 0.06, 1.0)
+                cr.set_line_width((self._stroke_width() * 10.0) / scale)
+                radius = 9.0 / scale
+                cr.arc(0, 0, radius, 0, math.tau)
+                cr.stroke()
+                cr.restore()
 
             point, needle_down = self.model.point_at(self.progress_mm)
             cr.save()
@@ -1445,6 +1478,23 @@ if GTK_AVAILABLE:
                     break
 
             cr.restore()
+
+        def _refresh_y_warning(self) -> None:
+            start = self.model.start_point
+            end = self.model.end_point
+            delta_mm = 0.0
+            mismatch = False
+            if start is not None and end is not None:
+                delta_mm = abs(start[1] - end[1]) * self.model.px_to_mm
+                mismatch = delta_mm > 0.1 + 1e-9
+            self._y_mismatch = mismatch
+            if mismatch:
+                message = _("WARNING: Start node and end node have different Y-axis positions (dY = {delta:.3f} mm > 0.1mm)").format(
+                    delta=delta_mm
+                )
+                self.y_warning_label.set_markup(f'<span foreground="#b8860b">{message}</span>')
+            else:
+                self.y_warning_label.set_markup("")
 else:
     class QuiltPreviewWindow:  # pragma: no cover - placeholder when GTK missing
         pass
