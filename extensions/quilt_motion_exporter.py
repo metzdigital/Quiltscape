@@ -783,6 +783,10 @@ if GTK_AVAILABLE:
             self.stagger = False
             self.stagger_percent = 50.0
             self._y_mismatch = False
+            self.flip_horizontal = False
+            self.flip_vertical = False
+            self.mirror_alternate_rows = False
+            self.mirror_alternate_rows_vertical = False
 
             self._build_ui()
             self._refresh_y_warning()
@@ -965,6 +969,30 @@ if GTK_AVAILABLE:
             pantograph_grid.attach(stagger_scale, 1, 4, 1, 1)
             self.stagger_scale = stagger_scale
 
+            mirror_toggle = Gtk.CheckButton(label=_("Mirror every other row horizontally"))
+            mirror_toggle.set_active(self.mirror_alternate_rows)
+            mirror_toggle.connect("toggled", self._on_mirror_rows_toggled)
+            pantograph_grid.attach(mirror_toggle, 0, 5, 2, 1)
+            self.mirror_toggle = mirror_toggle
+
+            mirror_v_toggle = Gtk.CheckButton(label=_("Mirror every other row vertically"))
+            mirror_v_toggle.set_active(self.mirror_alternate_rows_vertical)
+            mirror_v_toggle.connect("toggled", self._on_mirror_rows_v_toggled)
+            pantograph_grid.attach(mirror_v_toggle, 0, 6, 2, 1)
+            self.mirror_v_toggle = mirror_v_toggle
+
+            flip_h_toggle = Gtk.CheckButton(label=_("Flip horizontally"))
+            flip_h_toggle.set_active(self.flip_horizontal)
+            flip_h_toggle.connect("toggled", self._on_flip_h_toggled)
+            pantograph_grid.attach(flip_h_toggle, 0, 7, 2, 1)
+            self.flip_h_toggle = flip_h_toggle
+
+            flip_v_toggle = Gtk.CheckButton(label=_("Flip vertically"))
+            flip_v_toggle.set_active(self.flip_vertical)
+            flip_v_toggle.connect("toggled", self._on_flip_v_toggled)
+            pantograph_grid.attach(flip_v_toggle, 0, 8, 2, 1)
+            self.flip_v_toggle = flip_v_toggle
+
             export_label = Gtk.Label(label=_("Export format"))
             export_label.set_xalign(0.0)
             sidebar.pack_start(export_label, False, False, 0)
@@ -1080,6 +1108,22 @@ if GTK_AVAILABLE:
             if self.stagger:
                 self._invalidate_surface()
 
+        def _on_mirror_rows_toggled(self, button: Gtk.CheckButton) -> None:
+            self.mirror_alternate_rows = button.get_active()
+            self._invalidate_surface()
+
+        def _on_mirror_rows_v_toggled(self, button: Gtk.CheckButton) -> None:
+            self.mirror_alternate_rows_vertical = button.get_active()
+            self._invalidate_surface()
+
+        def _on_flip_h_toggled(self, button: Gtk.CheckButton) -> None:
+            self.flip_horizontal = button.get_active()
+            self._invalidate_surface()
+
+        def _on_flip_v_toggled(self, button: Gtk.CheckButton) -> None:
+            self.flip_vertical = button.get_active()
+            self._invalidate_surface()
+
         def _export(self, *_args) -> None:
             active = self.format_combo.get_active()
             if active < 0:
@@ -1193,11 +1237,14 @@ if GTK_AVAILABLE:
             cr.translate(offset_x, offset_y)
             cr.scale(scale, scale)
 
+            transform = lambda p: self._transform_point(p, False, False)
+
             self._draw_progress(cr)
 
             if self._y_mismatch and self.model.start_point is not None:
                 cr.save()
-                cr.translate(self.model.start_point[0], self.model.start_point[1])
+                start_pt = transform(self.model.start_point)
+                cr.translate(start_pt[0], start_pt[1])
                 cr.set_source_rgba(0.8, 0.62, 0.06, 1.0)
                 cr.set_line_width((self._stroke_width() * 10.0) / scale)
                 radius = 9.0 / scale
@@ -1207,7 +1254,8 @@ if GTK_AVAILABLE:
 
             if self._y_mismatch and self.model.end_point is not None:
                 cr.save()
-                cr.translate(self.model.end_point[0], self.model.end_point[1])
+                end_pt = transform(self.model.end_point)
+                cr.translate(end_pt[0], end_pt[1])
                 cr.set_source_rgba(0.8, 0.62, 0.06, 1.0)
                 cr.set_line_width((self._stroke_width() * 10.0) / scale)
                 radius = 9.0 / scale
@@ -1217,6 +1265,7 @@ if GTK_AVAILABLE:
 
             point, needle_down = self.model.point_at(self.progress_mm)
             cr.save()
+            point = transform(point)
             cr.translate(point[0], point[1])
             cr.set_source_rgba(0.9, 0.2, 0.2, 1.0 if needle_down else 0.7)
             radius = 4.0 / scale
@@ -1277,7 +1326,7 @@ if GTK_AVAILABLE:
             self.last_tick = time.monotonic()
             self.drawing_area.queue_draw()
 
-        def _pantograph_offsets(self) -> List[Tuple[float, float]]:
+        def _pantograph_offsets(self) -> List[Tuple[int, float, float]]:
             width_px = max(self.model.bounds[2] - self.model.bounds[0], 1e-3)
             height_px = max(self.model.bounds[3] - self.model.bounds[1], 1e-3)
             self._pattern_width_px = width_px
@@ -1292,15 +1341,27 @@ if GTK_AVAILABLE:
                 delta_x = width_px
                 delta_y = 0.0
 
-            offsets: List[Tuple[float, float]] = []
+            offsets: List[Tuple[int, float, float]] = []
             for row in range(self.row_count):
                 base_dx = stagger_px if (self.stagger and row % 2 == 1) else 0.0
                 row_dy = row * row_spacing_px
                 for repeat in range(self.repeat_count):
                     dx = base_dx + repeat * delta_x
                     dy = row_dy + repeat * delta_y
-                    offsets.append((dx, dy))
+                    offsets.append((row, dx, dy))
             return offsets
+
+        def _transform_point(self, point: Point, mirror_row_h: bool, mirror_row_v: bool) -> Point:
+            """Apply flip/mirror transforms around the pattern centre."""
+            min_x, min_y, max_x, max_y = self.model.bounds
+            cx = (min_x + max_x) / 2.0
+            cy = (min_y + max_y) / 2.0
+            x, y = point
+            if self.flip_horizontal or mirror_row_h:
+                x = 2 * cx - x
+            if self.flip_vertical or mirror_row_v:
+                y = 2 * cy - y
+            return (x, y)
 
         def _pantograph_bounds(self) -> Tuple[float, float, float, float]:
             min_x, min_y, max_x, max_y = self.model.bounds
@@ -1309,7 +1370,7 @@ if GTK_AVAILABLE:
             total_min_y = float("inf")
             total_max_x = float("-inf")
             total_max_y = float("-inf")
-            for dx, dy in offsets:
+            for _row_idx, dx, dy in offsets:
                 total_min_x = min(total_min_x, min_x + dx)
                 total_min_y = min(total_min_y, min_y + dy)
                 total_max_x = max(total_max_x, max_x + dx)
@@ -1361,14 +1422,16 @@ if GTK_AVAILABLE:
             cr.set_line_width(self._stroke_width())
             offsets = self._pantograph_offsets()
 
-            for dx, dy in offsets:
+            for row_idx, dx, dy in offsets:
                 cr.save()
                 cr.translate(dx, dy)
                 for seg in self.model.segments:
                     color = (0.2, 0.4, 0.7, 0.7) if seg.needle_down else (0.85, 0.2, 0.2, 0.8)
                     cr.set_source_rgba(*color)
                     cr.new_path()
-                    pts = seg.points
+                    mirror_row_h = self.mirror_alternate_rows and (row_idx % 2 == 1)
+                    mirror_row_v = self.mirror_alternate_rows_vertical and (row_idx % 2 == 1)
+                    pts = [self._transform_point(pt, mirror_row_h, mirror_row_v) for pt in seg.points]
                     cr.move_to(*pts[0])
                     for pt in pts[1:]:
                         cr.line_to(*pt)
@@ -1380,6 +1443,7 @@ if GTK_AVAILABLE:
             cr.save()
             cr.set_line_width(self._stroke_width() * 1.8)
             remaining = self.progress_mm
+            transform = lambda p: self._transform_point(p, False, False)
 
             def _edge_key(a: Point, b: Point) -> Tuple[Tuple[float, float], Tuple[float, float]]:
                 p0 = (round(a[0], 6), round(a[1], 6))
@@ -1440,7 +1504,10 @@ if GTK_AVAILABLE:
                         edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * t1,
                     )
 
-                    cells = _sample_cells(seg_start, seg_end)
+                    draw_start = transform(seg_start)
+                    draw_end = transform(seg_end)
+
+                    cells = _sample_cells(draw_start, draw_end)
                     # Overlap detection: require a modest fraction of samples already covered to count as a retrace.
                     if cells:
                         overlap_hits = [coverage.get(c, 0) for c in cells]
@@ -1454,8 +1521,8 @@ if GTK_AVAILABLE:
                         passes_completed = 0
                     cr.set_source_rgba(*_color_for_pass(passes_completed, edge.needle_down))
 
-                    cr.move_to(*seg_start)
-                    cr.line_to(*seg_end)
+                    cr.move_to(*draw_start)
+                    cr.line_to(*draw_end)
                     cr.stroke()
 
                     edge_cells.extend(cells)
