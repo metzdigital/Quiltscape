@@ -99,6 +99,36 @@ class DisplayColorTests(unittest.TestCase):
             )
         self.assertEqual(passes_completed, 1)
 
+class PantographLayoutTests(unittest.TestCase):
+    def test_stagger_extends_left_and_right(self) -> None:
+        bounds = (0.0, 0.0, 10.0, 5.0)
+        offsets = qme._compute_pantograph_offsets(
+            bounds=bounds,
+            repeat_count=2,
+            row_count=1,
+            row_distance_mm=5.0,
+            px_to_mm=1.0,
+            stagger=True,
+            stagger_percent=50.0,
+            start_point=(0.0, 0.0),
+            end_point=(10.0, 0.0),
+        )
+        dx_values = [dx for _row, dx, _dy in offsets if _row == 0]
+        self.assertLessEqual(min(dx_values), 0.0)
+        self.assertGreaterEqual(max(dx_values), 10.0)
+
+    def test_layout_bounds_ignore_stagger(self) -> None:
+        bounds = (0.0, 0.0, 10.0, 5.0)
+        layout = qme._compute_layout_bounds(
+            bounds=bounds,
+            repeat_count=2,
+            row_count=2,
+            row_distance_mm=5.0,
+            px_to_mm=1.0,
+            start_point=(0.0, 0.0),
+            end_point=(10.0, 0.0),
+        )
+        self.assertEqual(layout, (0.0, 0.0, 20.0, 15.0))
 
 
 class OptimizePathTests(unittest.TestCase):

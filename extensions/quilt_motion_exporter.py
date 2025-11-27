@@ -186,6 +186,90 @@ class MotionPathModel:
         return last_edge.end_px, last_edge.needle_down
 
 
+def _compute_pantograph_offsets(
+    bounds: Tuple[float, float, float, float],
+    repeat_count: int,
+    row_count: int,
+    row_distance_mm: float,
+    px_to_mm: float,
+    stagger: bool,
+    stagger_percent: float,
+    start_point: Optional[Point],
+    end_point: Optional[Point],
+) -> List[Tuple[int, float, float]]:
+    """Return offsets (row_idx, dx, dy) for pantograph repeats."""
+    min_x, min_y, max_x, max_y = bounds
+    width_px = max(max_x - min_x, 1e-3)
+    row_spacing_px = max(row_distance_mm / px_to_mm, 1.0)
+    stagger_px = width_px * (stagger_percent / 100.0) if stagger else 0.0
+
+    if start_point is not None and end_point is not None:
+        delta_x = end_point[0] - start_point[0]
+        delta_y = end_point[1] - start_point[1]
+    else:
+        delta_x = width_px
+        delta_y = 0.0
+
+    offsets: List[Tuple[int, float, float]] = []
+    target_min_x = min_x
+    target_max_x = max_x + (repeat_count - 1) * delta_x
+    for row in range(row_count):
+        base_dx = stagger_px if (stagger and row % 2 == 1) else 0.0
+        row_dy = row * row_spacing_px
+        row_dx: List[float] = [base_dx + repeat * delta_x for repeat in range(repeat_count)]
+        row_dx.sort()
+        if row_dx:
+            while min_x + row_dx[0] > target_min_x + 1e-6:
+                row_dx.insert(0, row_dx[0] - delta_x)
+            while max_x + row_dx[-1] < target_max_x - 1e-6:
+                row_dx.append(row_dx[-1] + delta_x)
+        for dx in row_dx:
+            dy = row_dy + (dx - base_dx) / delta_x * delta_y if delta_x else row_dy
+            offsets.append((row, dx, dy))
+    return offsets
+
+
+def _compute_layout_bounds(
+    bounds: Tuple[float, float, float, float],
+    repeat_count: int,
+    row_count: int,
+    row_distance_mm: float,
+    px_to_mm: float,
+    start_point: Optional[Point],
+    end_point: Optional[Point],
+) -> Tuple[float, float, float, float]:
+    """Rectangular layout bounds ignoring stagger offsets."""
+    min_x, min_y, max_x, max_y = bounds
+    width = max_x - min_x
+    height = max_y - min_y
+
+    offsets: List[Tuple[float, float]] = []
+    row_spacing_px = max(row_distance_mm / px_to_mm, 1.0)
+
+    if start_point is not None and end_point is not None:
+        delta_x = end_point[0] - start_point[0]
+        delta_y = end_point[1] - start_point[1]
+    else:
+        delta_x = width
+        delta_y = 0.0
+
+    for row in range(row_count):
+        row_dy = row * row_spacing_px
+        for repeat in range(repeat_count):
+            dx = repeat * delta_x
+            dy = row_dy + repeat * delta_y
+            offsets.append((dx, dy))
+
+    if not offsets:
+        return (min_x, min_y, max_x, max_y)
+
+    total_min_x = min(min_x + dx for dx, _dy in offsets)
+    total_min_y = min(min_y + dy for _dx, dy in offsets)
+    total_max_x = max(min_x + dx + width for dx, _dy in offsets)
+    total_max_y = max(min_y + dy + height for _dx, dy in offsets)
+    return (total_min_x, total_min_y, total_max_x, total_max_y)
+
+
 def _flatten_path_element(
     element: PathElement, tolerance: float = 0.5
 ) -> List[MotionSegment]:
@@ -787,6 +871,7 @@ if GTK_AVAILABLE:
             self.flip_vertical = False
             self.mirror_alternate_rows = False
             self.mirror_alternate_rows_vertical = False
+            self.export_entire_layout = False
 
             self._build_ui()
             self._refresh_y_warning()
@@ -997,11 +1082,21 @@ if GTK_AVAILABLE:
             export_label.set_xalign(0.0)
             sidebar.pack_start(export_label, False, False, 0)
 
+            export_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            sidebar.pack_start(export_row, False, False, 0)
+
             self.format_combo = Gtk.ComboBoxText()
             for key, profile in self.exporters.items():
                 self.format_combo.append_text(f"{key} – {profile.title}")
             self.format_combo.set_active(0)
-            sidebar.pack_start(self.format_combo, False, False, 0)
+            export_row.pack_start(self.format_combo, True, True, 0)
+
+            export_layout_toggle = Gtk.CheckButton(label=_("Export entire layout"))
+            export_layout_toggle.set_active(self.export_entire_layout)
+            export_layout_toggle.set_tooltip_text(_("Include repeats, rows, staggering, and mirroring in the exported file."))
+            export_layout_toggle.connect("toggled", self._on_export_layout_toggled)
+            export_row.pack_start(export_layout_toggle, False, False, 0)
+            self.export_layout_toggle = export_layout_toggle
 
             export_button = Gtk.Button(label=_("Export…"))
             export_button.connect("clicked", self._export)
@@ -1108,6 +1203,9 @@ if GTK_AVAILABLE:
             if self.stagger:
                 self._invalidate_surface()
 
+        def _on_export_layout_toggled(self, button: Gtk.CheckButton) -> None:
+            self.export_entire_layout = button.get_active()
+
         def _on_mirror_rows_toggled(self, button: Gtk.CheckButton) -> None:
             self.mirror_alternate_rows = button.get_active()
             self._invalidate_surface()
@@ -1172,7 +1270,8 @@ if GTK_AVAILABLE:
                 pass
 
             try:
-                profile.writer(self.model, out_path)
+                export_model = self._build_export_model() if self.export_entire_layout else self.model
+                profile.writer(export_model, out_path)
             except PermissionError:
                 self.export_status.set_text(
                     _("Cannot write to {path}. Pick a folder inside your home directory.").format(
@@ -1239,6 +1338,11 @@ if GTK_AVAILABLE:
 
             transform = lambda p: self._transform_point(p, False, False)
 
+            cr.save()
+            min_x, min_y, max_x, max_y = self._layout_bounds()
+            cr.rectangle(min_x, min_y, max_x - min_x, max_y - min_y)
+            cr.clip()
+
             self._draw_progress(cr)
 
             if self._y_mismatch and self.model.start_point is not None:
@@ -1272,6 +1376,7 @@ if GTK_AVAILABLE:
             cr.arc(0, 0, radius, 0, math.tau)
             cr.fill()
             cr.restore()
+            cr.restore()
 
             stitched = min(self.progress_mm, self.model.total_length_mm)
             percent = (stitched / self.model.total_length_mm * 100.0) if self.model.total_length_mm else 0.0
@@ -1301,7 +1406,12 @@ if GTK_AVAILABLE:
                 self._viewport = viewport
                 ctx.translate(viewport[1], viewport[2])
                 ctx.scale(viewport[0], viewport[0])
+                min_x, min_y, max_x, max_y = self._layout_bounds()
+                ctx.save()
+                ctx.rectangle(min_x, min_y, max_x - min_x, max_y - min_y)
+                ctx.clip()
                 self._draw_full_pattern(ctx)
+                ctx.restore()
             else:
                 self._viewport = (1.0, 0.0, 0.0)
 
@@ -1331,25 +1441,18 @@ if GTK_AVAILABLE:
             height_px = max(self.model.bounds[3] - self.model.bounds[1], 1e-3)
             self._pattern_width_px = width_px
             self._pattern_height_px = height_px
-            row_spacing_px = max(self.row_distance_mm / self.model.px_to_mm, 1.0)
-            stagger_px = width_px * (self.stagger_percent / 100.0) if self.stagger else 0.0
 
-            if self.model.start_point is not None and self.model.end_point is not None:
-                delta_x = self.model.end_point[0] - self.model.start_point[0]
-                delta_y = self.model.end_point[1] - self.model.start_point[1]
-            else:
-                delta_x = width_px
-                delta_y = 0.0
-
-            offsets: List[Tuple[int, float, float]] = []
-            for row in range(self.row_count):
-                base_dx = stagger_px if (self.stagger and row % 2 == 1) else 0.0
-                row_dy = row * row_spacing_px
-                for repeat in range(self.repeat_count):
-                    dx = base_dx + repeat * delta_x
-                    dy = row_dy + repeat * delta_y
-                    offsets.append((row, dx, dy))
-            return offsets
+            return _compute_pantograph_offsets(
+                self.model.bounds,
+                repeat_count=self.repeat_count,
+                row_count=self.row_count,
+                row_distance_mm=self.row_distance_mm,
+                px_to_mm=self.model.px_to_mm,
+                stagger=self.stagger,
+                stagger_percent=self.stagger_percent,
+                start_point=self.model.start_point,
+                end_point=self.model.end_point,
+            )
 
         def _transform_point(self, point: Point, mirror_row_h: bool, mirror_row_v: bool) -> Point:
             """Apply flip/mirror transforms around the pattern centre."""
@@ -1379,6 +1482,98 @@ if GTK_AVAILABLE:
                 total_min_x, total_min_y, total_max_x, total_max_y = min_x, min_y, max_x, max_y
             return (total_min_x, total_min_y, total_max_x, total_max_y)
 
+        def _layout_bounds(self) -> Tuple[float, float, float, float]:
+            return _compute_layout_bounds(
+                self.model.bounds,
+                repeat_count=self.repeat_count,
+                row_count=self.row_count,
+                row_distance_mm=self.row_distance_mm,
+                px_to_mm=self.model.px_to_mm,
+                start_point=self.model.start_point,
+                end_point=self.model.end_point,
+            )
+
+        def _build_export_model(self) -> MotionPathModel:
+            """Return a MotionPathModel representing the full layout."""
+            layout_bounds = self._layout_bounds()
+            offsets = self._pantograph_offsets()
+            stitched_segments: List[MotionSegment] = []
+            last_end: Optional[Point] = None
+
+            def _close_enough(a: Point, b: Point, tol: float = 1e-6) -> bool:
+                return math.isclose(a[0], b[0], abs_tol=tol) and math.isclose(a[1], b[1], abs_tol=tol)
+
+            def _clip_segment(p0: Point, p1: Point) -> Optional[Tuple[Point, Point]]:
+                min_x, min_y, max_x, max_y = layout_bounds
+                dx = p1[0] - p0[0]
+                dy = p1[1] - p0[1]
+                u1, u2 = 0.0, 1.0
+
+                def _update(p: float, q: float) -> bool:
+                    nonlocal u1, u2
+                    if math.isclose(p, 0.0, abs_tol=1e-12):
+                        return q >= 0.0
+                    t = q / p
+                    if p < 0:
+                        if t > u2:
+                            return False
+                        if t > u1:
+                            u1 = t
+                    else:
+                        if t < u1:
+                            return False
+                        if t < u2:
+                            u2 = t
+                    return True
+
+                if not (_update(-dx, p0[0] - min_x) and _update(dx, max_x - p0[0]) and _update(-dy, p0[1] - min_y) and _update(dy, max_y - p0[1])):
+                    return None
+                clipped_start = (p0[0] + u1 * dx, p0[1] + u1 * dy)
+                clipped_end = (p0[0] + u2 * dx, p0[1] + u2 * dy)
+                return clipped_start, clipped_end
+
+            def _clip_polyline(points: List[Point]) -> List[Point]:
+                clipped: List[Point] = []
+                for idx in range(1, len(points)):
+                    result = _clip_segment(points[idx - 1], points[idx])
+                    if result is None:
+                        continue
+                    a, b = result
+                    if not clipped:
+                        clipped.append(a)
+                    else:
+                        if not _close_enough(clipped[-1], a):
+                            clipped.append(a)
+                    clipped.append(b)
+                return clipped
+
+            for row_idx, dx, dy in offsets:
+                mirror_row_h = self.mirror_alternate_rows and (row_idx % 2 == 1)
+                mirror_row_v = self.mirror_alternate_rows_vertical and (row_idx % 2 == 1)
+                for seg in self.model.segments:
+                    pts: List[Point] = []
+                    for pt in seg.points:
+                        tx, ty = self._transform_point(pt, mirror_row_h, mirror_row_v)
+                        pts.append((tx + dx, ty + dy))
+                    if len(pts) < 2:
+                        continue
+                    pts = _clip_polyline(pts)
+                    if len(pts) < 2:
+                        continue
+                    if last_end is not None and not _close_enough(last_end, pts[0]):
+                        stitched_segments.append(MotionSegment(points=[last_end, pts[0]], needle_down=False))
+                    stitched_segments.append(MotionSegment(points=pts, needle_down=seg.needle_down))
+                    last_end = pts[-1]
+
+            if not stitched_segments:
+                return self.model
+
+            return MotionPathModel(
+                stitched_segments,
+                px_to_mm=self.model.px_to_mm,
+                doc_height_px=self.model.doc_height_px,
+            )
+
         def _stroke_width(self) -> float:
             span = max(
                 self.model.bounds[2] - self.model.bounds[0],
@@ -1406,7 +1601,7 @@ if GTK_AVAILABLE:
             return False
 
         def _compute_viewport(self, width: int, height: int) -> Tuple[float, float, float]:
-            min_x, min_y, max_x, max_y = self._pantograph_bounds()
+            min_x, min_y, max_x, max_y = self._layout_bounds()
             margin = 0.05
             span_x = max(max_x - min_x, 1e-3)
             span_y = max(max_y - min_y, 1e-3)
@@ -1421,6 +1616,11 @@ if GTK_AVAILABLE:
             cr.save()
             cr.set_line_width(self._stroke_width())
             offsets = self._pantograph_offsets()
+
+            min_x, min_y, max_x, max_y = self._layout_bounds()
+            cr.save()
+            cr.rectangle(min_x, min_y, max_x - min_x, max_y - min_y)
+            cr.clip()
 
             for row_idx, dx, dy in offsets:
                 cr.save()
@@ -1437,6 +1637,7 @@ if GTK_AVAILABLE:
                         cr.line_to(*pt)
                     cr.stroke()
                 cr.restore()
+            cr.restore()
             cr.restore()
 
         def _draw_progress(self, cr) -> None:
