@@ -76,5 +76,68 @@ class ExportProfilesTests(unittest.TestCase):
         self.assertTrue(required.issubset(set(qme.EXPORT_PROFILES.keys())))
 
 
+class OptimizePathTests(unittest.TestCase):
+    def test_optimize_path_reduces_overlap_and_preserves_endpoints(self) -> None:
+        # Triangle where the base edge is stitched twice.
+        original_points = [
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (20.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 0.0),
+            (10.0, 0.0),
+        ]
+        segments = [qme.MotionSegment(points=original_points, needle_down=True)]
+        optimized_segments = qme.optimize_motion_segments(
+            segments,
+            start_point=original_points[0],
+            end_point=original_points[-1],
+        )
+
+        self.assertEqual(len(optimized_segments), 1)
+        optimized = optimized_segments[0]
+        self.assertTrue(optimized.needle_down)
+        self.assertGreaterEqual(len(optimized.points), 4)
+        # Path endpoints must match the original endpoints.
+        self.assertAlmostEqual(optimized.points[0][0], original_points[0][0], places=6)
+        self.assertAlmostEqual(optimized.points[0][1], original_points[0][1], places=6)
+        self.assertAlmostEqual(optimized.points[-1][0], original_points[-1][0], places=6)
+        self.assertAlmostEqual(optimized.points[-1][1], original_points[-1][1], places=6)
+
+        def overlap_length(segment_list):
+            from math import dist, isclose
+
+            edge_counts = {}
+            overlap_total = 0.0
+            for segment in segment_list:
+                if not segment.needle_down or len(segment.points) < 2:
+                    continue
+                for index in range(len(segment.points) - 1):
+                    start = segment.points[index]
+                    end = segment.points[index + 1]
+                    if isclose(start[0], end[0], abs_tol=1e-9) and isclose(
+                        start[1], end[1], abs_tol=1e-9
+                    ):
+                        continue
+                    key_start = (round(start[0], 6), round(start[1], 6))
+                    key_end = (round(end[0], 6), round(end[1], 6))
+                    if key_start == key_end:
+                        continue
+                    canonical = (
+                        key_start if key_start <= key_end else key_end,
+                        key_end if key_start <= key_end else key_start,
+                    )
+                    length = dist(start, end)
+                    previous_count = edge_counts.get(canonical, 0)
+                    if previous_count > 0:
+                        overlap_total += length
+                    edge_counts[canonical] = previous_count + 1
+            return overlap_total
+
+        original_overlap = overlap_length(segments)
+        optimized_overlap = overlap_length(optimized_segments)
+        self.assertLessEqual(optimized_overlap, original_overlap)
+
+
 if __name__ == "__main__":
     unittest.main()

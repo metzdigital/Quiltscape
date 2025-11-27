@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import time
+import heapq
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,6 +235,518 @@ class ExportProfile:
 
 
 if GTK_AVAILABLE:
+    def optimize_motion_segments(
+        segments: List[MotionSegment],
+        start_point: Optional[Point] = None,
+        end_point: Optional[Point] = None,
+        tolerance: float = 1e-6,
+    ) -> List[MotionSegment]:
+        """Reorder a continuous stitched path to reduce geometric overlaps.
+
+        This preserves:
+
+        - The stitched design (the set of needle‑down edges), and
+        - The logical start and end locations of the motion path.
+
+        The optimisation only touches needle-down segments and falls back to
+        the original segments if:
+
+        - The stitched graph is disconnected, or
+        - The optimised path would change the stitched geometry, or
+        - The overlap metric is not improved.
+        """
+
+        def quantize_point(point: Point) -> Tuple[float, float]:
+            return (round(point[0], 6), round(point[1], 6))
+
+        def stitched_edge_counts(segment_list: List[MotionSegment]) -> Dict[Tuple[Tuple[float, float], Tuple[float, float]], int]:
+            counts: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int] = {}
+            for segment in segment_list:
+                if not segment.needle_down or len(segment.points) < 2:
+                    continue
+                for index in range(len(segment.points) - 1):
+                    start = segment.points[index]
+                    end = segment.points[index + 1]
+                    if math.isclose(start[0], end[0], abs_tol=1e-9) and math.isclose(
+                        start[1], end[1], abs_tol=1e-9
+                    ):
+                        continue
+                    start_key = quantize_point(start)
+                    end_key = quantize_point(end)
+                    if start_key == end_key:
+                        continue
+                    canonical = (
+                        start_key if start_key <= end_key else end_key,
+                        end_key if start_key <= end_key else start_key,
+                    )
+                    counts[canonical] = counts.get(canonical, 0) + 1
+            return counts
+
+        def overlap_length(
+            segment_list: List[MotionSegment],
+            baseline_counts: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int],
+        ) -> float:
+            """Return total extra length beyond baseline multiplicity."""
+            seen: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int] = {}
+            overlap_total = 0.0
+            for segment in segment_list:
+                if not segment.needle_down or len(segment.points) < 2:
+                    continue
+                for index in range(len(segment.points) - 1):
+                    start = segment.points[index]
+                    end = segment.points[index + 1]
+                    if math.isclose(start[0], end[0], abs_tol=1e-9) and math.isclose(
+                        start[1], end[1], abs_tol=1e-9
+                    ):
+                        continue
+                    start_key = quantize_point(start)
+                    end_key = quantize_point(end)
+                    if start_key == end_key:
+                        continue
+                    canonical = (
+                        start_key if start_key <= end_key else end_key,
+                        end_key if start_key <= end_key else start_key,
+                    )
+                    length = math.dist(start, end)
+                    current_count = seen.get(canonical, 0) + 1
+                    baseline = baseline_counts.get(canonical, 0)
+                    if current_count > baseline:
+                        overlap_total += length
+                    seen[canonical] = current_count
+            return overlap_total
+
+        def segment_intersections(a: Point, b: Point, c: Point, d: Point) -> List[Point]:
+            """Return intersection points between two closed segments."""
+            def _on_segment(p: Point, q: Point, r: Point) -> bool:
+                return min(p[0], r[0]) - 1e-9 <= q[0] <= max(p[0], r[0]) + 1e-9 and min(p[1], r[1]) - 1e-9 <= q[1] <= max(p[1], r[1]) + 1e-9
+
+            def _orient(p: Point, q: Point, r: Point) -> float:
+                return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+
+            o1 = _orient(a, b, c)
+            o2 = _orient(a, b, d)
+            o3 = _orient(c, d, a)
+            o4 = _orient(c, d, b)
+
+            points: List[Point] = []
+
+            # General intersection
+            if (o1 == 0 and _on_segment(a, c, b)) or (o2 == 0 and _on_segment(a, d, b)) or (o3 == 0 and _on_segment(c, a, d)) or (o4 == 0 and _on_segment(c, b, d)):
+                if o1 == 0 and _on_segment(a, c, b):
+                    points.append(c)
+                if o2 == 0 and _on_segment(a, d, b):
+                    points.append(d)
+                if o3 == 0 and _on_segment(c, a, d):
+                    points.append(a)
+                if o4 == 0 and _on_segment(c, b, d):
+                    points.append(b)
+
+            denom = (a[0] - b[0]) * (c[1] - d[1]) - (a[1] - b[1]) * (c[0] - d[0])
+            if abs(denom) > 1e-12:
+                t = ((a[0] - c[0]) * (c[1] - d[1]) - (a[1] - c[1]) * (c[0] - d[0])) / denom
+                u = ((a[0] - c[0]) * (a[1] - b[1]) - (a[1] - c[1]) * (a[0] - b[0])) / denom
+                if -1e-9 <= t <= 1 + 1e-9 and -1e-9 <= u <= 1 + 1e-9:
+                    px = a[0] + t * (b[0] - a[0])
+                    py = a[1] + t * (b[1] - a[1])
+                    points.append((px, py))
+
+            if not points:
+                return []
+            # Deduplicate near-coincident points
+            unique: List[Point] = []
+            for p in points:
+                if not any(math.isclose(p[0], q[0], abs_tol=1e-9) and math.isclose(p[1], q[1], abs_tol=1e-9) for q in unique):
+                    unique.append(p)
+            return unique
+
+        stitched_segments = [
+            segment
+            for segment in segments
+            if segment.needle_down and len(segment.points) >= 2
+        ]
+        if not stitched_segments:
+            return segments
+
+        # Flatten to raw edges and split at every intersection so the optimiser
+        # can choose alternate routes through intersection nodes.
+        raw_edges: List[Tuple[Point, Point]] = []
+        for segment in stitched_segments:
+            for idx in range(len(segment.points) - 1):
+                a = segment.points[idx]
+                b = segment.points[idx + 1]
+                if math.isclose(a[0], b[0], abs_tol=1e-9) and math.isclose(a[1], b[1], abs_tol=1e-9):
+                    continue
+                raw_edges.append((a, b))
+
+        if not raw_edges:
+            return segments
+
+        split_points: List[List[Point]] = [[edge[0], edge[1]] for edge in raw_edges]
+        for i in range(len(raw_edges)):
+            for j in range(i + 1, len(raw_edges)):
+                p1, p2 = raw_edges[i]
+                p3, p4 = raw_edges[j]
+                pts = segment_intersections(p1, p2, p3, p4)
+                if not pts:
+                    continue
+                split_points[i].extend(pts)
+                split_points[j].extend(pts)
+
+        split_edges: List[Tuple[Point, Point]] = []
+        for idx, edge in enumerate(raw_edges):
+            a, b = edge
+            pts = split_points[idx]
+            # Sort points along the edge using projection parameter.
+            dx = b[0] - a[0]
+            dy = b[1] - a[1]
+            def param(pt: Point) -> float:
+                length_sq = dx * dx + dy * dy
+                if length_sq <= 0:
+                    return 0.0
+                return ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / length_sq
+            pts_sorted = sorted(pts, key=param)
+            # Create sub-edges.
+            for i in range(1, len(pts_sorted)):
+                p_start = pts_sorted[i - 1]
+                p_end = pts_sorted[i]
+                if math.isclose(p_start[0], p_end[0], abs_tol=1e-9) and math.isclose(
+                    p_start[1], p_end[1], abs_tol=1e-9
+                ):
+                    continue
+                split_edges.append((p_start, p_end))
+
+        if not split_edges:
+            return segments
+
+        vertex_index_by_point: Dict[Tuple[float, float], int] = {}
+        vertices: List[Point] = []
+
+        def vertex_for(point: Point) -> int:
+            key = quantize_point(point)
+            existing_index = vertex_index_by_point.get(key)
+            if existing_index is not None:
+                return existing_index
+            new_index = len(vertices)
+            vertex_index_by_point[key] = new_index
+            vertices.append(point)
+            return new_index
+
+        base_edges: List[Tuple[int, int, float]] = []
+        used_vertices: set = set()
+        edge_map: Dict[Tuple[int, int], float] = {}
+        for a, b in split_edges:
+            va = vertex_for(a)
+            vb = vertex_for(b)
+            if va == vb:
+                continue
+            length = math.dist(vertices[va], vertices[vb])
+            key = (va, vb) if va <= vb else (vb, va)
+            # Keep only the shortest instance of a geometric edge; duplicated
+            # overlaps in the original drawing are treated as optional.
+            prev = edge_map.get(key)
+            if prev is None or length < prev - 1e-9:
+                edge_map[key] = length
+            used_vertices.add(va)
+            used_vertices.add(vb)
+
+        for (va, vb), length in edge_map.items():
+            base_edges.append((va, vb, length))
+
+        if not base_edges:
+            return segments
+
+        # Baseline counts: each unique stitched sub-edge must appear at least once
+        # (duplicate overlaps in the original drawing are treated as optional).
+        baseline_edge_counts: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int] = {}
+        for vertex_index_a, vertex_index_b, _length in base_edges:
+            pa = quantize_point(vertices[vertex_index_a])
+            pb = quantize_point(vertices[vertex_index_b])
+            key = (pa, pb) if pa <= pb else (pb, pa)
+            if key not in baseline_edge_counts:
+                baseline_edge_counts[key] = 1
+
+        vertex_count = len(vertices)
+        adjacency: List[List[Tuple[int, float, int]]] = [[] for _ in range(vertex_count)]
+        for edge_index, (vertex_index_a, vertex_index_b, length) in enumerate(base_edges):
+            adjacency[vertex_index_a].append((vertex_index_b, length, edge_index))
+            adjacency[vertex_index_b].append((vertex_index_a, length, edge_index))
+
+        # Ensure the stitched graph is a single connected component.
+        starting_vertex = next(iter(used_vertices))
+        visited_vertices: set = set()
+        stack: List[int] = [starting_vertex]
+        while stack:
+            current_vertex = stack.pop()
+            if current_vertex in visited_vertices:
+                continue
+            visited_vertices.add(current_vertex)
+            for neighbour_vertex, _length, _edge_index in adjacency[current_vertex]:
+                if neighbour_vertex not in visited_vertices:
+                    stack.append(neighbour_vertex)
+        if visited_vertices != used_vertices:
+            return segments
+
+        degrees: List[int] = [0] * vertex_count
+        for vertex_index_a, vertex_index_b, _length in base_edges:
+            degrees[vertex_index_a] += 1
+            degrees[vertex_index_b] += 1
+        odd_vertices: List[int] = [
+            index for index, degree in enumerate(degrees) if degree % 2 == 1
+        ]
+
+        def shortest_paths(source_vertex: int) -> Tuple[List[float], List[Optional[int]]]:
+            distances: List[float] = [float("inf")] * vertex_count
+            previous_vertices: List[Optional[int]] = [None] * vertex_count
+            distances[source_vertex] = 0.0
+            heap: List[Tuple[float, int]] = [(0.0, source_vertex)]
+            while heap:
+                distance, vertex_index_current = heapq.heappop(heap)
+                if distance > distances[vertex_index_current] + 1e-12:
+                    continue
+                for neighbour_vertex, edge_length, _edge_index in adjacency[vertex_index_current]:
+                    new_distance = distance + edge_length
+                    if new_distance + 1e-12 < distances[neighbour_vertex]:
+                        distances[neighbour_vertex] = new_distance
+                        previous_vertices[neighbour_vertex] = vertex_index_current
+                        heapq.heappush(heap, (new_distance, neighbour_vertex))
+            return distances, previous_vertices
+
+        # Track how many times each base edge is duplicated when fixing parity.
+        duplicate_paths: List[List[int]] = []
+
+        # Determine desired end-point parities so that the final walk keeps the
+        # same logical start and end locations as the original motion path.
+        if start_point is not None:
+            start_key = quantize_point(start_point)
+            start_vertex_index = vertex_index_by_point.get(start_key, starting_vertex)
+        else:
+            start_vertex_index = starting_vertex
+
+        if end_point is not None:
+            end_key = quantize_point(end_point)
+            end_vertex_index = vertex_index_by_point.get(end_key, start_vertex_index)
+        else:
+            end_vertex_index = start_vertex_index
+
+        target_odd: set = set()
+        if start_vertex_index != end_vertex_index:
+            target_odd = {start_vertex_index, end_vertex_index}
+
+        required_parity_vertices = set(odd_vertices) ^ target_odd
+
+        required_count = len(required_parity_vertices)
+        if required_count % 2 != 0:
+            # Should not happen in a valid undirected graph, but guard anyway.
+            return segments
+
+        def shortest_path_with_trace(source_vertex_index: int, target_vertex_index: int) -> Tuple[float, List[int]]:
+            distances: List[float] = [float("inf")] * vertex_count
+            previous_vertices: List[Optional[int]] = [None] * vertex_count
+            previous_edge: List[Optional[int]] = [None] * vertex_count
+            distances[source_vertex_index] = 0.0
+            heap: List[Tuple[float, int]] = [(0.0, source_vertex_index)]
+
+            while heap:
+                distance, vertex_index_current = heapq.heappop(heap)
+                if distance > distances[vertex_index_current] + 1e-12:
+                    continue
+                if vertex_index_current == target_vertex_index:
+                    break
+                for neighbour_vertex, edge_length, edge_index in adjacency[vertex_index_current]:
+                    new_distance = distance + edge_length
+                    if new_distance + 1e-12 < distances[neighbour_vertex]:
+                        distances[neighbour_vertex] = new_distance
+                        previous_vertices[neighbour_vertex] = vertex_index_current
+                        previous_edge[neighbour_vertex] = edge_index
+                        heapq.heappush(heap, (new_distance, neighbour_vertex))
+
+            if not math.isfinite(distances[target_vertex_index]):
+                return float("inf"), []
+
+            path_edges: List[int] = []
+            current_vertex = target_vertex_index
+            while current_vertex != source_vertex_index:
+                prev = previous_vertices[current_vertex]
+                edge_index = previous_edge[current_vertex]
+                if prev is None or edge_index is None:
+                    return float("inf"), []
+                path_edges.append(edge_index)
+                current_vertex = prev
+            path_edges.reverse()
+            return distances[target_vertex_index], path_edges
+
+        if 0 < required_count <= 16:
+            # Exact minimum-weight perfect matching via DP (Held-Karp style).
+            required_vertices_sorted = sorted(required_parity_vertices)
+            m = len(required_vertices_sorted)
+            # Precompute pairwise shortest paths.
+            pair_costs: Dict[Tuple[int, int], Tuple[float, List[int]]] = {}
+            for i in range(m):
+                for j in range(i + 1, m):
+                    u = required_vertices_sorted[i]
+                    v = required_vertices_sorted[j]
+                    dist, path_edges = shortest_path_with_trace(u, v)
+                    pair_costs[(i, j)] = (dist, path_edges)
+
+            full_mask = (1 << m) - 1
+            dp: List[float] = [float("inf")] * (1 << m)
+            choice: List[Optional[Tuple[int, int]]] = [None] * (1 << m)
+            dp[0] = 0.0
+
+            for mask in range(1 << m):
+                if dp[mask] == float("inf"):
+                    continue
+                # Find first unmatched vertex.
+                try:
+                    first = next(idx for idx in range(m) if not (mask & (1 << idx)))
+                except StopIteration:
+                    continue
+                for second in range(first + 1, m):
+                    if mask & (1 << second):
+                        continue
+                    pair = (first, second)
+                    cost, _path_edges = pair_costs.get(pair, (float("inf"), []))
+                    if not math.isfinite(cost) or not _path_edges:
+                        continue
+                    next_mask = mask | (1 << first) | (1 << second)
+                    new_cost = dp[mask] + cost
+                    if new_cost < dp[next_mask] - 1e-12:
+                        dp[next_mask] = new_cost
+                        choice[next_mask] = pair
+
+            if dp[full_mask] == float("inf"):
+                return segments
+
+            # Reconstruct chosen pairs.
+            mask = full_mask
+            chosen_pairs: List[Tuple[int, int]] = []
+            while mask:
+                pair = choice[mask]
+                if pair is None:
+                    break
+                chosen_pairs.append(pair)
+                mask &= ~(1 << pair[0])
+                mask &= ~(1 << pair[1])
+
+            duplicate_paths: List[List[int]] = []
+            for first, second in chosen_pairs:
+                u = required_vertices_sorted[first]
+                v = required_vertices_sorted[second]
+                cost, path_edges = pair_costs[(first, second)]
+                if not path_edges or not math.isfinite(cost):
+                    return segments
+                duplicate_paths.append(path_edges)
+
+        elif 16 < required_count <= 24:
+            # Greedy pairing for larger sets to keep runtime bounded.
+            remaining_vertices = set(required_parity_vertices)
+            while remaining_vertices:
+                candidates = sorted(remaining_vertices)
+                best_pair: Optional[Tuple[int, int]] = None
+                best_cost = float("inf")
+                best_path_edges: List[int] = []
+
+                for i in range(len(candidates)):
+                    u = candidates[i]
+                    for j in range(i + 1, len(candidates)):
+                        v = candidates[j]
+                        cost, path_edges = shortest_path_with_trace(u, v)
+                        if not path_edges or not math.isfinite(cost):
+                            continue
+                        if cost < best_cost:
+                            best_cost = cost
+                            best_pair = (u, v)
+                            best_path_edges = path_edges
+
+                if best_pair is None or not best_path_edges:
+                    return segments
+
+                duplicate_paths.append(best_path_edges)
+                remaining_vertices.remove(best_pair[0])
+                remaining_vertices.remove(best_pair[1])
+        elif required_count > 24:
+            return segments
+
+        extended_edges: List[Tuple[int, int, float]] = list(base_edges)
+        for path_edges in duplicate_paths:
+            for edge_index in path_edges:
+                base_vertex_a, base_vertex_b, base_length = base_edges[edge_index]
+                extended_edges.append((base_vertex_a, base_vertex_b, base_length))
+
+        adjacency_multigraph: List[List[Tuple[int, int]]] = [
+            [] for _ in range(vertex_count)
+        ]
+        for edge_index, (vertex_index_a, vertex_index_b, _length) in enumerate(
+            extended_edges
+        ):
+            adjacency_multigraph[vertex_index_a].append((vertex_index_b, edge_index))
+            adjacency_multigraph[vertex_index_b].append((vertex_index_a, edge_index))
+
+        used_edges: List[bool] = [False] * len(extended_edges)
+
+        stack_vertices: List[int] = [start_vertex_index]
+        euler_vertices: List[int] = []
+
+        while stack_vertices:
+            vertex_index_current = stack_vertices[-1]
+            adjacency_list = adjacency_multigraph[vertex_index_current]
+            while adjacency_list and used_edges[adjacency_list[-1][1]]:
+                adjacency_list.pop()
+            if not adjacency_list:
+                euler_vertices.append(stack_vertices.pop())
+            else:
+                neighbour_vertex, edge_index = adjacency_list.pop()
+                if used_edges[edge_index]:
+                    continue
+                used_edges[edge_index] = True
+                stack_vertices.append(neighbour_vertex)
+
+        euler_vertices.reverse()
+        if not euler_vertices:
+            return segments
+
+        optimized_points: List[Point] = []
+        for vertex_index_current in euler_vertices:
+            point = vertices[vertex_index_current]
+            if not optimized_points:
+                optimized_points.append(point)
+                continue
+            last_point = optimized_points[-1]
+            if math.isclose(point[0], last_point[0], abs_tol=tolerance) and math.isclose(
+                point[1], last_point[1], abs_tol=tolerance
+            ):
+                continue
+            optimized_points.append(point)
+
+        if len(optimized_points) < 2:
+            return segments
+
+        optimized_segment = MotionSegment(points=optimized_points, needle_down=True)
+        optimized_segments: List[MotionSegment] = []
+        inserted_stitched_segment = False
+        for segment in segments:
+            if segment.needle_down and len(segment.points) >= 2:
+                if not inserted_stitched_segment:
+                    optimized_segments.append(optimized_segment)
+                    inserted_stitched_segment = True
+                continue
+            optimized_segments.append(segment)
+
+        optimized_edge_counts = stitched_edge_counts(optimized_segments)
+        for edge_key, baseline_count in baseline_edge_counts.items():
+            if optimized_edge_counts.get(edge_key, 0) < baseline_count:
+                # Missing required geometry from the original design.
+                return segments
+
+        original_overlap = overlap_length(segments, baseline_edge_counts)
+        optimized_overlap = overlap_length(optimized_segments, baseline_edge_counts)
+
+        if optimized_overlap + tolerance >= original_overlap:
+            return segments
+
+        return optimized_segments
+
+
     class QuiltPreviewWindow(Gtk.Window):  # type: ignore[misc]
         """Interactive GTK window that previews and exports the motion path."""
 
@@ -306,6 +819,11 @@ if GTK_AVAILABLE:
             restart_button = Gtk.Button(label=_("Restart"))
             restart_button.connect("clicked", self._restart)
             controls.pack_start(restart_button, True, True, 0)
+
+            optimize_button = Gtk.Button(label=_("Optimize path"))
+            optimize_button.connect("clicked", self._optimize_path)
+            controls.pack_start(optimize_button, True, True, 0)
+            self.optimize_button = optimize_button
 
             speed_label = Gtk.Label(label=_("Preview speed"))
             speed_label.set_xalign(0.0)
@@ -480,6 +998,48 @@ if GTK_AVAILABLE:
             self._set_progress_slider_value(0.0)
             self.preview_status.set_text(_("Preview reset. Press Play to start."))
             self._surface_dirty = True
+
+        def _optimize_path(self, *_args) -> None:
+            if not self.model.segments:
+                self.preview_status.set_text(_("No path to optimize."))
+                return
+            try:
+                optimized_segments = optimize_motion_segments(
+                    self.model.segments,
+                    start_point=self.model.start_point,
+                    end_point=self.model.end_point,
+                )
+            except Exception as exc:  # pragma: no cover - GUI feedback
+                self.preview_status.set_text(_("Optimization failed: ") + str(exc))
+                return
+
+            if optimized_segments is self.model.segments:
+                self.preview_status.set_text(_("Path is already optimised."))
+                return
+
+            if optimized_segments == self.model.segments:
+                self.preview_status.set_text(_("Path is already optimised."))
+                return
+
+            self.model = MotionPathModel(
+                optimized_segments,
+                px_to_mm=self.model.px_to_mm,
+                doc_height_px=self.model.doc_height_px,
+            )
+            base_height_px = max(self.model.bounds[3] - self.model.bounds[1], 1e-3)
+            self.base_row_distance_mm = base_height_px * self.model.px_to_mm
+            self.row_distance_mm = self.base_row_distance_mm
+            if hasattr(self, "row_distance_spin"):
+                adjustment = self.row_distance_spin.get_adjustment()
+                adjustment.set_value(self.row_distance_mm)
+
+            self.progress_mm = 0.0
+            self.playing = False
+            self.play_button.set_label(_("Play"))
+            self.last_tick = time.monotonic()
+            self._surface_dirty = True
+            self.drawing_area.queue_draw()
+            self.preview_status.set_text(_("Path optimised to reduce overlaps."))
 
         def _on_speed_changed(self, slider: Gtk.Scale) -> None:
             self.speed_multiplier = slider.get_value()
