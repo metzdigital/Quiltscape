@@ -1353,8 +1353,28 @@ if GTK_AVAILABLE:
                 p1 = (round(b[0], 6), round(b[1], 6))
                 return (p0, p1) if p0 <= p1 else (p1, p0)
 
-            # Track stitched length per edge for the current progress position.
-            edge_progress: Dict[Tuple[Tuple[float, float], Tuple[float, float]], float] = {}
+            # Spatial coverage grid for previously completed edges (or drawn portions).
+            # Coverage is applied only after an edge finishes to avoid self-triggered retrace coloring.
+            cell_size = self._stroke_width() * 0.01
+            coverage: Dict[Tuple[int, int], int] = {}
+
+            def _sample_cells(p0: Point, p1: Point) -> List[Tuple[int, int]]:
+                length = math.dist(p0, p1)
+                if length <= 1e-12:
+                    gx = int(round(p0[0] / cell_size))
+                    gy = int(round(p0[1] / cell_size))
+                    return [(gx, gy)]
+                steps = max(1, int(math.ceil(length / cell_size)))
+                coords: List[Tuple[int, int]] = []
+                for s in range(steps + 1):
+                    t = s / steps
+                    x = p0[0] + (p1[0] - p0[0]) * t
+                    y = p0[1] + (p1[1] - p0[1]) * t
+                    gx = int(round(x / cell_size))
+                    gy = int(round(y / cell_size))
+                    if not coords or coords[-1] != (gx, gy):
+                        coords.append((gx, gy))
+                return coords
 
             def _subdivide_and_draw(edge: MotionEdge) -> bool:
                 if remaining <= edge.start_length_mm:
@@ -1362,12 +1382,12 @@ if GTK_AVAILABLE:
                 length_remaining = min(remaining - edge.start_length_mm, edge.length_mm)
                 if length_remaining <= 0:
                     return True
-                key = _edge_key(edge.start_px, edge.end_px)
-                stitched_before = edge_progress.get(key, 0.0)
 
                 # Subdivide the edge into up to 12 chunks (more responsive color for longer edges).
                 chunks = max(1, min(12, int(math.ceil(edge.length_mm / max(edge.length_mm / 5.0, 1e-6)))))
                 chunk_len = edge.length_mm / chunks if chunks else edge.length_mm
+
+                edge_cells: List[Tuple[int, int]] = []
 
                 for i in range(chunks):
                     seg_start_mm = i * chunk_len
@@ -1387,23 +1407,36 @@ if GTK_AVAILABLE:
                         edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * t1,
                     )
 
-                    passes_completed = int(stitched_before / edge.length_mm + 1e-9)
+                    cells = _sample_cells(seg_start, seg_end)
+                    # Overlap detection: require a modest fraction of samples already covered to count as a retrace.
+                    if cells:
+                        overlap_hits = [coverage.get(c, 0) for c in cells]
+                        covered = [v for v in overlap_hits if v > 0]
+                        threshold = max(1, int(len(cells) * 0.05))
+                        if len(covered) >= threshold:
+                            passes_completed = max(covered)
+                        else:
+                            passes_completed = 0
+                    else:
+                        passes_completed = 0
                     cr.set_source_rgba(*_color_for_pass(passes_completed, edge.needle_down))
 
                     cr.move_to(*seg_start)
                     cr.line_to(*seg_end)
                     cr.stroke()
 
-                    stitched_before += seg_draw_mm
+                    edge_cells.extend(cells)
 
                     # If we haven't finished this edge, stop drawing further edges.
                     if seg_draw_mm + seg_start_mm + 1e-9 < length_remaining:
                         continue
                     if length_remaining + 1e-9 < edge.length_mm:
-                        edge_progress[key] = stitched_before
+                        for cell in edge_cells:
+                            coverage[cell] = coverage.get(cell, 0) + 1
                         return False
 
-                edge_progress[key] = stitched_before
+                for cell in edge_cells:
+                    coverage[cell] = coverage.get(cell, 0) + 1
 
                 return True
 
@@ -1559,12 +1592,12 @@ def _cartesian_coords(model: MotionPathModel, x_mm: float, y_mm: float) -> Tuple
 def _color_for_pass(passes_completed: int, needle_down: bool) -> Tuple[float, float, float, float]:
     """Return RGBA for a given pass count and stitch state."""
     if not needle_down:
-        return (0.9, 0.25, 0.25, 0.9)
+        return (0.9, 0.15, 0.15, 0.9)  # red for needle-up jumps
     if passes_completed <= 0:
         return (0.1, 0.55, 0.85, 0.9)  # blue first pass
     if passes_completed == 1:
-        return (0.95, 0.8, 0.25, 0.9)  # yellow second pass
-    return (0.9, 0.25, 0.25, 0.9)  # red 3+ passes
+        return (0.95, 0.85, 0.25, 0.9)  # yellow second pass
+    return (0.98, 0.55, 0.1, 0.9)  # orange 3+ passes
 
 
 EXPORT_PROFILES: Dict[str, ExportProfile] = {
