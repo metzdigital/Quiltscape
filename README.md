@@ -3,8 +3,11 @@
 An Inkscape extension that turns any vector path into a long‑arm quilting motion path. It lets you:
 
 - Preserve the draw order of the selected paths and animate them with play/pause/restart plus adjustable speed.
-- Scrub through the design with a progress slider to inspect any stitch in context.
-- Visualize the pattern as a multi-row pantograph (repeat count, rows, row spacing, stagger toggle, stagger percent) with a light-themed GTK preview.
+- Scrub through the design with a progress slider to inspect any stitch in context, including stitched/jump coloring.
+- Visualize the pattern as a multi-row pantograph (repeat count, rows, row spacing, stagger toggle + percent) with optional per-row mirroring (horizontal/vertical), global flips, and rectangular clipping so staggered rows stay flush edge-to-edge.
+- See safety cues: start/end Y-axis mismatch warning label plus yellow rings on endpoints when dY > 0.1 mm.
+- Optimize a stitched path to reduce self-overlaps while preserving geometry and endpoints, with a single-click toggle in the preview.
+- Export either the single pattern or the entire layout (repeats/rows/stagger/mirroring/flips) using a switchback path that alternates direction row-by-row without lifting the needle, keeping the sewn path continuous.
 - Export the resulting motion path as either a millimetre-true DXF polyline (machine-ready) or an animated GIF of the stitching motion—pick whichever fits your workflow.
 
 > **Note:** The machine formats included here rely on open, text-based encodings of the stitch path. Every format is generated from the same normalized point stream, so the files remain easy to post-process with vendor-provided converters if needed.
@@ -52,8 +55,11 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 4. Use the preview window:
    - **Play/Pause/Restart** control the animation, while the **Preview speed** slider changes draw speed.
    - Drag the **Progress** slider to jump to any point along the stitch path.
-   - Adjust the **Pantograph layout** panel to tile the design into repeated rows (control repeats, rows, row distance in mm, stagger toggle, stagger percent). The preview updates instantly to show the full pantograph layout.
-   - Pick an export format and press **Export…** to write a file (DXF for machine import, Animated GIF for sharing/preview).
+   - Adjust the **Pantograph layout** panel to tile the design into repeated rows (control repeats, rows, row distance in mm, stagger toggle, stagger percent) with per-row mirroring and global flips. Staggered rows are clipped to a rectangle and auto-filled left/right so the layout stays rectangular.
+   - Enable **Mirror every other row horizontally/vertically** for variety and **Flip horizontally/vertically** for global orientation changes.
+   - Click **Optimize path** to reorder stitched segments and reduce self-overlap; geometry and endpoints are preserved, and travel edges are kept intact.
+   - Watch for the **Y-axis warning**: if start/end Y differ by more than 0.1 mm, a yellow label and rings appear on the endpoints.
+   - Pick an export format and press **Export…** to write a file. Optionally check **Export entire layout** to bake repeats/rows/stagger/mirroring/flips into the file using a switchback, needle-down path (alternating row directions, no jumps between rows).
 5. The exported files list every stitch (and jump) in document millimetres. They can be loaded directly by many quilting systems or passed through manufacturer tooling if post-processing is required.
 
 > **Tip:** The extension runs immediately, so make sure your intended motion paths are selected before launching it. If nothing is selected, Inkscape shows an alert reminding you to pick paths first.
