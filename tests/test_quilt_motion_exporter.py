@@ -61,6 +61,15 @@ class ExportWriterTests(unittest.TestCase):
             self.assertIn("LWPOLYLINE", data)
             self.assertIn("STITCH", data)
 
+    def test_qct_writer_emits_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "path.dxf"
+            qme._write_qct_dxf(self.model, out)
+            data = out.read_text()
+            self.assertIn("LINE", data)
+            self.assertIn("Layer", data)
+            self.assertIn("ENTITIES", data)
+
     def test_gif_writer_generates_animation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "path.gif"
@@ -72,7 +81,7 @@ class ExportWriterTests(unittest.TestCase):
 
 class ExportProfilesTests(unittest.TestCase):
     def test_all_required_formats_registered(self) -> None:
-        required = {"DXF", "GIF"}
+        required = {"DXF", "QCT", "GIF"}
         self.assertTrue(required.issubset(set(qme.EXPORT_PROFILES.keys())))
 
 

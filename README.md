@@ -8,7 +8,7 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 - See safety cues: start/end Y-axis mismatch warning label plus yellow rings on endpoints when dY > 0.1 mm.
 - Optimize a stitched path to reduce self-overlaps while preserving geometry and endpoints, with a single-click toggle in the preview.
 - Export either the single pattern or the entire layout (repeats/rows/stagger/mirroring/flips) using a switchback path that alternates direction row-by-row without lifting the needle, keeping the sewn path continuous.
-- Export the resulting motion path as either a millimetre-true DXF polyline (machine-ready) or an animated GIF of the stitching motion—pick whichever fits your workflow.
+- Export the resulting motion path as either a millimetre-true DXF polyline, a QCT-compatible DXF line file, or an animated GIF of the stitching motion—pick whichever fits your workflow.
 
 > **Note:** The machine formats included here rely on open, text-based encodings of the stitch path. Every format is generated from the same normalized point stream, so the files remain easy to post-process with vendor-provided converters if needed.
 
@@ -126,4 +126,5 @@ Inside Inkscape, keep the XML editor open to inspect the produced files if you n
 ## Export formats
 
 - **DXF** – AutoCAD “lightweight polyline” entities. Stitch segments go on layer `STITCH`, jump segments on `TRAVEL`, and all coordinates are exported in millimetres to match your Inkscape document.
+- **QCT DXF** – QCT-compatible DXF using per-segment `LINE` entities on layer `Layer`, with millimetre coordinates matching your document.
 - **Animated GIF** – A shareable preview of the motion path. The extension redraws the path over ~60 frames (using the same light theme as the preview) and shows the stitch head progressing along the pattern, making it easy to review or send to clients without requiring their quilting software.

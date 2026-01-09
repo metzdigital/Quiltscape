@@ -1832,6 +1832,56 @@ def _write_dxf(model: MotionPathModel, outfile: Path) -> None:
     outfile.write_text("\n".join(content), encoding="ascii")
 
 
+def _write_qct_dxf(model: MotionPathModel, outfile: Path) -> None:
+    def format_number(value: float) -> str:
+        text = f"{value:.4f}".rstrip("0").rstrip(".")
+        if text == "-0":
+            text = "0"
+        return text
+
+    def add_code(lines: List[str], code: str) -> None:
+        lines.append(f" {code} ")
+
+    def add_text(lines: List[str], value: str) -> None:
+        lines.append(value)
+
+    def add_number(lines: List[str], value: float) -> None:
+        lines.append(f"{format_number(value)} ")
+
+    lines: List[str] = []
+    add_code(lines, "0")
+    add_text(lines, "SECTION")
+    add_code(lines, "2")
+    add_text(lines, "ENTITIES")
+
+    for needle_down, pts in model.iter_segments_mm():
+        if not needle_down or len(pts) < 2:
+            continue
+        for start, end in zip(pts, pts[1:]):
+            x1, y1 = _cartesian_coords(model, start[0], start[1])
+            x2, y2 = _cartesian_coords(model, end[0], end[1])
+            add_code(lines, "0")
+            add_text(lines, "LINE")
+            add_code(lines, "8")
+            add_text(lines, "Layer")
+            add_code(lines, "10")
+            add_number(lines, x1)
+            add_code(lines, "20")
+            add_number(lines, y1)
+            add_code(lines, "11")
+            add_number(lines, x2)
+            add_code(lines, "21")
+            add_number(lines, y2)
+
+    add_code(lines, "0")
+    add_text(lines, "ENDSEC")
+    add_code(lines, "0")
+    add_text(lines, "EOF")
+
+    payload = "\r\n".join(lines) + "\r\n"
+    outfile.write_bytes(payload.encode("ascii"))
+
+
 def _write_gif(model: MotionPathModel, outfile: Path) -> None:
     frame_count = 60 if model.total_length_mm > 0 else 1
     width = 700
@@ -1938,6 +1988,12 @@ EXPORT_PROFILES: Dict[str, ExportProfile] = {
         extension="dxf",
         description="Light‑weight polyline DXF",
         writer=_write_dxf,
+    ),
+    "QCT": ExportProfile(
+        title="QCT DXF (lines)",
+        extension="dxf",
+        description="QCT-compatible line DXF",
+        writer=_write_qct_dxf,
     ),
     "GIF": ExportProfile(
         title="Animated GIF",
