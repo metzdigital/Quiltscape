@@ -2,8 +2,8 @@
 """
 Install the Quilt Motion Preview & Export extension and its Python deps.
 
-Run this with the same Python that Inkscape uses so package installs land
-in the correct environment.
+Dependencies are installed into a sidecar folder inside the Inkscape
+extensions directory, so you do not need to touch Inkscape's bundled Python.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ EXTENSION_FILES = (
     ROOT_DIR / "extensions" / "quilt_motion_exporter.inx",
 )
 REQUIREMENTS_FILE = ROOT_DIR / "requirements.txt"
-DEFAULT_INKSCAPE_ENV = "INKSCAPE_PYTHON"
 
 
 def default_extension_dir() -> Path:
@@ -73,24 +72,37 @@ def install_extension(dest_dir: Path, dry_run: bool) -> None:
             print(f"Copied {src.name} -> {dest}")
 
 
-def run_pip_install(python_exe: str, dry_run: bool) -> None:
+def run_pip_install(python_exe: str, libs_dir: Path, dry_run: bool) -> None:
     if not REQUIREMENTS_FILE.exists():
         print("No requirements.txt found; skipping pip install.")
         return
-    cmd = [python_exe, "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)]
+    cmd = [
+        python_exe,
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        str(REQUIREMENTS_FILE),
+        "--target",
+        str(libs_dir),
+        "--upgrade",
+    ]
     if dry_run:
         print(f"[dry-run] Would run: {' '.join(cmd)}")
         return
     try:
+        libs_dir.mkdir(parents=True, exist_ok=True)
         subprocess.check_call(cmd)
     except subprocess.CalledProcessError as exc:
+        print("Pip install failed; continuing without optional dependencies.")
         if platform.system().lower() == "darwin" and exc.returncode == -9:
             print("Pip install failed with SIGKILL on macOS.")
             print("This often means the Inkscape app is quarantined by Gatekeeper.")
             print("Try:")
             print('  xattr -dr com.apple.quarantine "/Applications/Inkscape.app"')
             print("Then launch Inkscape once and re-run this installer.")
-        raise
+        print("Some export options may be unavailable if dependencies are missing.")
+        return
 
 
 def check_optional_deps() -> None:
@@ -113,57 +125,16 @@ def check_optional_deps() -> None:
         print("Missing optional runtime dependencies:")
         for item in missing:
             print(f"  - {item}")
-        print("See README.md for OS-specific install hints.")
+        if platform.system().lower() == "darwin" and "PyGObject (gi) + cairo" in missing:
+            print("macOS fix:")
+            print("  - Use the official Inkscape DMG (it bundles Gtk + PyGObject).")
+            print("  - If already installed, remove quarantine and relaunch:")
+            print('    xattr -dr com.apple.quarantine "/Applications/Inkscape.app"')
+            print("    open -a /Applications/Inkscape.app")
+        else:
+            print("See README.md for OS-specific install hints.")
 
 
-def _candidate_paths(paths: list[str]) -> list[Path]:
-    return [Path(path).expanduser() for path in paths if path]
-
-
-def find_inkscape_python() -> Path | None:
-    override = os.environ.get(DEFAULT_INKSCAPE_ENV)
-    if override:
-        return Path(override).expanduser()
-
-    system = platform.system().lower()
-    candidates: list[Path] = []
-
-    if system == "windows":
-        candidates.extend(
-            _candidate_paths(
-                [
-                    os.path.join(os.environ.get("ProgramFiles", ""), "Inkscape", "bin", "python.exe"),
-                    os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Inkscape", "bin", "python.exe"),
-                    os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Inkscape", "bin", "python.exe"),
-                ]
-            )
-        )
-    elif system == "darwin":
-        candidates.extend(
-            _candidate_paths(
-                [
-                    "/Applications/Inkscape.app/Contents/Resources/bin/python3",
-                    "/Applications/Inkscape.app/Contents/Resources/bin/python",
-                ]
-            )
-        )
-
-    inkscape_exe = shutil.which("inkscape")
-    if inkscape_exe:
-        inkscape_path = Path(inkscape_exe).resolve()
-        if system == "windows":
-            candidates.append(inkscape_path.parent / "python.exe")
-        elif system == "darwin":
-            for parent in inkscape_path.parents:
-                if parent.name == "Inkscape.app":
-                    candidates.append(parent / "Contents" / "Resources" / "bin" / "python3")
-                    candidates.append(parent / "Contents" / "Resources" / "bin" / "python")
-                    break
-
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -178,16 +149,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--python",
-        default=None,
+        default=sys.executable,
         help=(
-            "Python executable used for pip installs. Defaults to the detected "
-            "Inkscape Python or the current interpreter."
+            "Python executable used for pip installs (default: current interpreter)."
         ),
     )
     parser.add_argument(
-        "--inkscape-python",
+        "--libs-dir",
+        type=Path,
         default=None,
-        help=f"Explicit Inkscape Python path (or set {DEFAULT_INKSCAPE_ENV}).",
+        help="Directory to install Python dependencies into.",
     )
     parser.add_argument(
         "--skip-pip",
@@ -204,23 +175,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    inkscape_python = None
-    if args.inkscape_python:
-        inkscape_python = Path(args.inkscape_python).expanduser()
-    else:
-        inkscape_python = find_inkscape_python()
-
-    python_exe = args.python or str(inkscape_python) if inkscape_python else sys.executable
-
-    if inkscape_python:
-        print(f"Using Inkscape Python: {inkscape_python}")
-    else:
-        print(f"Using current Python: {python_exe}")
-        print("Tip: set INKSCAPE_PYTHON or --inkscape-python for bundled Inkscape Python.")
+    python_exe = args.python
+    libs_dir = args.libs_dir or (args.dest / "quilt_motion_exporter_libs")
+    print(f"Using Python for deps: {python_exe}")
+    print(f"Installing deps into: {libs_dir}")
 
     install_extension(args.dest, args.dry_run)
     if not args.skip_pip:
-        run_pip_install(python_exe, args.dry_run)
+        run_pip_install(python_exe, libs_dir, args.dry_run)
     if not args.dry_run:
         check_optional_deps()
     print("Done. Restart Inkscape to load the extension.")

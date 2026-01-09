@@ -13,6 +13,7 @@ import math
 import time
 import heapq
 import warnings
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -22,7 +23,30 @@ from inkex import bezier, units
 from inkex.elements import PathElement
 from inkex.localization import inkex_gettext as _
 from inkex.paths import CubicSuperPath
-from PIL import Image, ImageDraw
+try:
+_EXTENSION_DIR = Path(__file__).resolve().parent
+_SIDECAR_LIBS = _EXTENSION_DIR / "quilt_motion_exporter_libs"
+if _SIDECAR_LIBS.exists():
+    sys.path.insert(0, str(_SIDECAR_LIBS))
+
+try:
+    from PIL import Image, ImageDraw
+
+    PIL_AVAILABLE = True
+    PIL_LOAD_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - optional dependency
+    Image = None  # type: ignore
+    ImageDraw = None  # type: ignore
+    PIL_AVAILABLE = False
+    PIL_LOAD_ERROR = str(exc)
+
+    PIL_AVAILABLE = True
+    PIL_LOAD_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - optional dependency
+    Image = None  # type: ignore
+    ImageDraw = None  # type: ignore
+    PIL_AVAILABLE = False
+    PIL_LOAD_ERROR = str(exc)
 
 warnings.filterwarnings(
     "ignore",
@@ -1883,6 +1907,8 @@ def _write_qct_dxf(model: MotionPathModel, outfile: Path) -> None:
 
 
 def _write_gif(model: MotionPathModel, outfile: Path) -> None:
+    if not PIL_AVAILABLE:
+        raise RuntimeError("Pillow is required for GIF export.")
     frame_count = 60 if model.total_length_mm > 0 else 1
     width = 700
     height = 700
@@ -1965,6 +1991,8 @@ def _write_gif(model: MotionPathModel, outfile: Path) -> None:
         loop=0,
         disposal=2,
     )
+
+
 def _cartesian_coords(model: MotionPathModel, x_mm: float, y_mm: float) -> Tuple[float, float]:
     if model.doc_height_mm is not None:
         return x_mm, model.doc_height_mm - y_mm
@@ -1995,13 +2023,14 @@ EXPORT_PROFILES: Dict[str, ExportProfile] = {
         description="QCT-compatible line DXF",
         writer=_write_qct_dxf,
     ),
-    "GIF": ExportProfile(
+}
+if PIL_AVAILABLE:
+    EXPORT_PROFILES["GIF"] = ExportProfile(
         title="Animated GIF",
         extension="gif",
         description="Preview animation exported as GIF",
         writer=lambda model, dest: _write_gif(model, dest),
-    ),
-}
+    )
 
 
 class QuiltMotionExportExtension(inkex.EffectExtension):

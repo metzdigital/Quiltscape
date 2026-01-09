@@ -71,6 +71,8 @@ class ExportWriterTests(unittest.TestCase):
             self.assertIn("ENTITIES", data)
 
     def test_gif_writer_generates_animation(self) -> None:
+        if not qme.PIL_AVAILABLE:
+            self.skipTest("Pillow not available")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "path.gif"
             qme._write_gif(self.model, out)
@@ -81,7 +83,9 @@ class ExportWriterTests(unittest.TestCase):
 
 class ExportProfilesTests(unittest.TestCase):
     def test_all_required_formats_registered(self) -> None:
-        required = {"DXF", "QCT", "GIF"}
+        required = {"DXF", "QCT"}
+        if qme.PIL_AVAILABLE:
+            required.add("GIF")
         self.assertTrue(required.issubset(set(qme.EXPORT_PROFILES.keys())))
 
 
