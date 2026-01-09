@@ -14,6 +14,31 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 
 ## Installation
 
+### Installer (recommended)
+
+1. **Download** this repository (clone or unzip).
+2. **Run the installer** (it will auto-detect Inkscape’s Python when possible):
+
+   ```bash
+   python3 install_extension.py
+   ```
+
+   If auto-detection fails, run the bundled Python directly so the
+   dependencies land in the same environment. Examples:
+
+   ```bash
+   "C:\Program Files\Inkscape\bin\python.exe" install_extension.py
+   /Applications/Inkscape.app/Contents/Resources/bin/python3 install_extension.py
+   ```
+
+   You can override the install target with `--dest` or `INKSCAPE_EXTENSION_DIR`,
+   and control pip installs with `--python`, `--inkscape-python`, or `--skip-pip`.
+
+3. **Restart** Inkscape and find the extension under
+   `Extensions → Quilting → Quilt Motion Preview & Export`.
+
+### Manual install
+
 1. **Download** this repository (clone or unzip).
 2. **Copy** the `extensions/` and `README.md` contents into your Inkscape user extensions folder:
 
