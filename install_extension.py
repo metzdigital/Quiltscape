@@ -81,7 +81,16 @@ def run_pip_install(python_exe: str, dry_run: bool) -> None:
     if dry_run:
         print(f"[dry-run] Would run: {' '.join(cmd)}")
         return
-    subprocess.check_call(cmd)
+    try:
+        subprocess.check_call(cmd)
+    except subprocess.CalledProcessError as exc:
+        if platform.system().lower() == "darwin" and exc.returncode == -9:
+            print("Pip install failed with SIGKILL on macOS.")
+            print("This often means the Inkscape app is quarantined by Gatekeeper.")
+            print("Try:")
+            print('  xattr -dr com.apple.quarantine "/Applications/Inkscape.app"')
+            print("Then launch Inkscape once and re-run this installer.")
+        raise
 
 
 def check_optional_deps() -> None:
