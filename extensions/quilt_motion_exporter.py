@@ -23,7 +23,7 @@ from inkex import bezier, units
 from inkex.elements import PathElement
 from inkex.localization import inkex_gettext as _
 from inkex.paths import CubicSuperPath
-try:
+
 _EXTENSION_DIR = Path(__file__).resolve().parent
 _SIDECAR_LIBS = _EXTENSION_DIR / "quilt_motion_exporter_libs"
 if _SIDECAR_LIBS.exists():
@@ -31,14 +31,6 @@ if _SIDECAR_LIBS.exists():
 
 try:
     from PIL import Image, ImageDraw
-
-    PIL_AVAILABLE = True
-    PIL_LOAD_ERROR: Optional[str] = None
-except Exception as exc:  # pragma: no cover - optional dependency
-    Image = None  # type: ignore
-    ImageDraw = None  # type: ignore
-    PIL_AVAILABLE = False
-    PIL_LOAD_ERROR = str(exc)
 
     PIL_AVAILABLE = True
     PIL_LOAD_ERROR: Optional[str] = None
