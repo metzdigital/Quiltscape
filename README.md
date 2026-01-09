@@ -45,25 +45,17 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 
    Create the directory if it does not exist, then restart Inkscape.
 
-3. **Ensure Gtk bindings exist** for Python:
+3. **Ensure Tkinter is available** for Python (standard library UI toolkit):
 
    - **Linux (Apt)**:
 
      ```bash
-     sudo apt install python3-gi python3-gi-cairo python3-cairo gir1.2-gtk-3.0
+     sudo apt install python3-tk
      ```
 
-   - **Linux (other distros)**: install the PyGObject/Gtk runtime packages via your package manager (look for `pygobject3`, `python3-cairo`, `gtk3` introspection).
+   - **Linux (other distros)**: install the `tk`/`python3-tk` package via your package manager.
 
-   - **Windows**: install the official Inkscape package (which bundles Python 3, Gtk, and PyGObject). If you run a custom Python, make sure `pygobject` and `pycairo` are installed through MSYS2 or the Gnome for Windows runtime.
-
-   - **macOS**: install via Homebrew:
-
-     ```bash
-     brew install pygobject3 gtk+3 py3cairo
-     ```
-
-     or ensure the DMG build of Inkscape includes `python3-gi`. If not, use `python3 -m pip install pyobjc pygobject pycairo` within the Inkscape Python environment.
+   - **Windows/macOS**: Tkinter is bundled with the official Python builds that ship with Inkscape.
 
 4. Start Inkscape and find the extension under `Extensions → Quilting → Quilt Motion Preview & Export`.
 
@@ -90,7 +82,7 @@ When running Inkscape from the Snap store, extensions may only write inside your
 
 ## Implementation notes
 
-- The preview window is built with PyGObject/Gtk 3, which ships with modern Inkscape builds.
+- The preview window is built with Tkinter, which ships with standard Python builds.
 - Paths are flattened via Inkscape’s `CubicSuperPath` utilities to keep Bézier curves accurate. Each sub‑path becomes a stitch segment, and travel jumps are inserted between disconnected components so long-arm controllers can raise the needle when necessary.
 - Exporters live in `extensions/quilt_motion_exporter.py`. Each format is represented by a small writer function that receives the normalized motion model—adding more formats is as simple as registering another `ExportProfile`.
 - Pantograph repeats are rendered purely in the preview: we offset each instance by the actual delta between its start and end nodes, optionally staggering alternate rows so you can audition complex layouts without duplicating geometry inside the SVG.

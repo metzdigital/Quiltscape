@@ -113,26 +113,15 @@ def check_optional_deps() -> None:
         missing.append("Pillow")
 
     try:
-        import gi  # type: ignore
-
-        gi.require_version("Gtk", "3.0")
-        gi.require_foreign("cairo")
-        import cairo  # noqa: F401  # type: ignore
+        import tkinter  # noqa: F401
     except Exception:
-        missing.append("PyGObject (gi) + cairo")
+        missing.append("Tkinter (python3-tk)")
 
     if missing:
         print("Missing optional runtime dependencies:")
         for item in missing:
             print(f"  - {item}")
-        if platform.system().lower() == "darwin" and "PyGObject (gi) + cairo" in missing:
-            print("macOS fix:")
-            print("  - Use the official Inkscape DMG (it bundles Gtk + PyGObject).")
-            print("  - If already installed, remove quarantine and relaunch:")
-            print('    xattr -dr com.apple.quarantine "/Applications/Inkscape.app"')
-            print("    open -a /Applications/Inkscape.app")
-        else:
-            print("See README.md for OS-specific install hints.")
+        print("See README.md for OS-specific install hints.")
 
 
 

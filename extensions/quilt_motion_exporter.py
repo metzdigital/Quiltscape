@@ -46,25 +46,15 @@ warnings.filterwarnings(
     category=ImportWarning,
 )
 
-GTK_AVAILABLE = False
-GTK_LOAD_ERROR: Optional[str] = None
-
 try:
-    import gi  # type: ignore
+    import tkinter as tk
+    from tkinter import filedialog, ttk
 
-    gi.require_version("Gtk", "3.0")
-    gi.require_foreign("cairo")
-
-    gi.require_version("Pango", "1.0")
-    from gi.repository import GLib, Gtk, Pango, cairo as gi_cairo  # type: ignore
-    import cairo  # type: ignore
-
-    GTK_AVAILABLE = True
-except Exception as exc:  # pragma: no cover - Gtk is only available inside Inkscape
-    GTK_AVAILABLE = False
-    GTK_LOAD_ERROR = str(exc)
-    GLib = None  # type: ignore
-    Gtk = None  # type: ignore
+    TK_AVAILABLE = True
+    TK_LOAD_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - Tk is standard but may be missing
+    TK_AVAILABLE = False
+    TK_LOAD_ERROR = str(exc)
 
 
 Point = Tuple[float, float]
@@ -216,7 +206,8 @@ def _compute_pantograph_offsets(
     """Return offsets (row_idx, dx, dy) for pantograph repeats."""
     min_x, min_y, max_x, max_y = bounds
     width_px = max(max_x - min_x, 1e-3)
-    row_spacing_px = max(row_distance_mm / px_to_mm, 1.0)
+    height_px = max(max_y - min_y, 1e-3)
+    row_spacing_px = height_px + max(row_distance_mm / px_to_mm, 1.0)
     stagger_px = width_px * (stagger_percent / 100.0) if stagger else 0.0
 
     if start_point is not None and end_point is not None:
@@ -260,7 +251,7 @@ def _compute_layout_bounds(
     height = max_y - min_y
 
     offsets: List[Tuple[float, float]] = []
-    row_spacing_px = max(row_distance_mm / px_to_mm, 1.0)
+    row_spacing_px = height + max(row_distance_mm / px_to_mm, 1.0)
 
     if start_point is not None and end_point is not None:
         delta_x = end_point[0] - start_point[0]
@@ -334,521 +325,521 @@ class ExportProfile:
         self.writer = writer
 
 
-if GTK_AVAILABLE:
-    def optimize_motion_segments(
-        segments: List[MotionSegment],
-        start_point: Optional[Point] = None,
-        end_point: Optional[Point] = None,
-        tolerance: float = 1e-6,
-    ) -> List[MotionSegment]:
-        """Reorder a continuous stitched path to reduce geometric overlaps.
+def optimize_motion_segments(
+    segments: List[MotionSegment],
+    start_point: Optional[Point] = None,
+    end_point: Optional[Point] = None,
+    tolerance: float = 1e-6,
+) -> List[MotionSegment]:
+    """Reorder a continuous stitched path to reduce geometric overlaps.
 
-        This preserves:
+    This preserves:
 
-        - The stitched design (the set of needle‑down edges), and
-        - The logical start and end locations of the motion path.
+    - The stitched design (the set of needle‑down edges), and
+    - The logical start and end locations of the motion path.
 
-        The optimisation only touches needle-down segments and falls back to
-        the original segments if:
+    The optimisation only touches needle-down segments and falls back to
+    the original segments if:
 
-        - The stitched graph is disconnected, or
-        - The optimised path would change the stitched geometry, or
-        - The overlap metric is not improved.
-        """
+    - The stitched graph is disconnected, or
+    - The optimised path would change the stitched geometry, or
+    - The overlap metric is not improved.
+    """
 
-        def quantize_point(point: Point) -> Tuple[float, float]:
-            return (round(point[0], 6), round(point[1], 6))
+    def quantize_point(point: Point) -> Tuple[float, float]:
+        return (round(point[0], 6), round(point[1], 6))
 
-        def stitched_edge_counts(segment_list: List[MotionSegment]) -> Dict[Tuple[Tuple[float, float], Tuple[float, float]], int]:
-            counts: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int] = {}
-            for segment in segment_list:
-                if not segment.needle_down or len(segment.points) < 2:
-                    continue
-                for index in range(len(segment.points) - 1):
-                    start = segment.points[index]
-                    end = segment.points[index + 1]
-                    if math.isclose(start[0], end[0], abs_tol=1e-9) and math.isclose(
-                        start[1], end[1], abs_tol=1e-9
-                    ):
-                        continue
-                    start_key = quantize_point(start)
-                    end_key = quantize_point(end)
-                    if start_key == end_key:
-                        continue
-                    canonical = (
-                        start_key if start_key <= end_key else end_key,
-                        end_key if start_key <= end_key else start_key,
-                    )
-                    counts[canonical] = counts.get(canonical, 0) + 1
-            return counts
-
-        def overlap_length(
-            segment_list: List[MotionSegment],
-            baseline_counts: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int],
-        ) -> float:
-            """Return total extra length beyond baseline multiplicity."""
-            seen: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int] = {}
-            overlap_total = 0.0
-            for segment in segment_list:
-                if not segment.needle_down or len(segment.points) < 2:
-                    continue
-                for index in range(len(segment.points) - 1):
-                    start = segment.points[index]
-                    end = segment.points[index + 1]
-                    if math.isclose(start[0], end[0], abs_tol=1e-9) and math.isclose(
-                        start[1], end[1], abs_tol=1e-9
-                    ):
-                        continue
-                    start_key = quantize_point(start)
-                    end_key = quantize_point(end)
-                    if start_key == end_key:
-                        continue
-                    canonical = (
-                        start_key if start_key <= end_key else end_key,
-                        end_key if start_key <= end_key else start_key,
-                    )
-                    length = math.dist(start, end)
-                    current_count = seen.get(canonical, 0) + 1
-                    baseline = baseline_counts.get(canonical, 0)
-                    if current_count > baseline:
-                        overlap_total += length
-                    seen[canonical] = current_count
-            return overlap_total
-
-        def segment_intersections(a: Point, b: Point, c: Point, d: Point) -> List[Point]:
-            """Return intersection points between two closed segments."""
-            def _on_segment(p: Point, q: Point, r: Point) -> bool:
-                return min(p[0], r[0]) - 1e-9 <= q[0] <= max(p[0], r[0]) + 1e-9 and min(p[1], r[1]) - 1e-9 <= q[1] <= max(p[1], r[1]) + 1e-9
-
-            def _orient(p: Point, q: Point, r: Point) -> float:
-                return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
-
-            o1 = _orient(a, b, c)
-            o2 = _orient(a, b, d)
-            o3 = _orient(c, d, a)
-            o4 = _orient(c, d, b)
-
-            points: List[Point] = []
-
-            # General intersection
-            if (o1 == 0 and _on_segment(a, c, b)) or (o2 == 0 and _on_segment(a, d, b)) or (o3 == 0 and _on_segment(c, a, d)) or (o4 == 0 and _on_segment(c, b, d)):
-                if o1 == 0 and _on_segment(a, c, b):
-                    points.append(c)
-                if o2 == 0 and _on_segment(a, d, b):
-                    points.append(d)
-                if o3 == 0 and _on_segment(c, a, d):
-                    points.append(a)
-                if o4 == 0 and _on_segment(c, b, d):
-                    points.append(b)
-
-            denom = (a[0] - b[0]) * (c[1] - d[1]) - (a[1] - b[1]) * (c[0] - d[0])
-            if abs(denom) > 1e-12:
-                t = ((a[0] - c[0]) * (c[1] - d[1]) - (a[1] - c[1]) * (c[0] - d[0])) / denom
-                u = ((a[0] - c[0]) * (a[1] - b[1]) - (a[1] - c[1]) * (a[0] - b[0])) / denom
-                if -1e-9 <= t <= 1 + 1e-9 and -1e-9 <= u <= 1 + 1e-9:
-                    px = a[0] + t * (b[0] - a[0])
-                    py = a[1] + t * (b[1] - a[1])
-                    points.append((px, py))
-
-            if not points:
-                return []
-            # Deduplicate near-coincident points
-            unique: List[Point] = []
-            for p in points:
-                if not any(math.isclose(p[0], q[0], abs_tol=1e-9) and math.isclose(p[1], q[1], abs_tol=1e-9) for q in unique):
-                    unique.append(p)
-            return unique
-
-        stitched_segments = [
-            segment
-            for segment in segments
-            if segment.needle_down and len(segment.points) >= 2
-        ]
-        if not stitched_segments:
-            return segments
-
-        # Flatten to raw edges and split at every intersection so the optimiser
-        # can choose alternate routes through intersection nodes.
-        raw_edges: List[Tuple[Point, Point]] = []
-        for segment in stitched_segments:
-            for idx in range(len(segment.points) - 1):
-                a = segment.points[idx]
-                b = segment.points[idx + 1]
-                if math.isclose(a[0], b[0], abs_tol=1e-9) and math.isclose(a[1], b[1], abs_tol=1e-9):
-                    continue
-                raw_edges.append((a, b))
-
-        if not raw_edges:
-            return segments
-
-        split_points: List[List[Point]] = [[edge[0], edge[1]] for edge in raw_edges]
-        for i in range(len(raw_edges)):
-            for j in range(i + 1, len(raw_edges)):
-                p1, p2 = raw_edges[i]
-                p3, p4 = raw_edges[j]
-                pts = segment_intersections(p1, p2, p3, p4)
-                if not pts:
-                    continue
-                split_points[i].extend(pts)
-                split_points[j].extend(pts)
-
-        split_edges: List[Tuple[Point, Point]] = []
-        for idx, edge in enumerate(raw_edges):
-            a, b = edge
-            pts = split_points[idx]
-            # Sort points along the edge using projection parameter.
-            dx = b[0] - a[0]
-            dy = b[1] - a[1]
-            def param(pt: Point) -> float:
-                length_sq = dx * dx + dy * dy
-                if length_sq <= 0:
-                    return 0.0
-                return ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / length_sq
-            pts_sorted = sorted(pts, key=param)
-            # Create sub-edges.
-            for i in range(1, len(pts_sorted)):
-                p_start = pts_sorted[i - 1]
-                p_end = pts_sorted[i]
-                if math.isclose(p_start[0], p_end[0], abs_tol=1e-9) and math.isclose(
-                    p_start[1], p_end[1], abs_tol=1e-9
+    def stitched_edge_counts(segment_list: List[MotionSegment]) -> Dict[Tuple[Tuple[float, float], Tuple[float, float]], int]:
+        counts: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int] = {}
+        for segment in segment_list:
+            if not segment.needle_down or len(segment.points) < 2:
+                continue
+            for index in range(len(segment.points) - 1):
+                start = segment.points[index]
+                end = segment.points[index + 1]
+                if math.isclose(start[0], end[0], abs_tol=1e-9) and math.isclose(
+                    start[1], end[1], abs_tol=1e-9
                 ):
                     continue
-                split_edges.append((p_start, p_end))
+                start_key = quantize_point(start)
+                end_key = quantize_point(end)
+                if start_key == end_key:
+                    continue
+                canonical = (
+                    start_key if start_key <= end_key else end_key,
+                    end_key if start_key <= end_key else start_key,
+                )
+                counts[canonical] = counts.get(canonical, 0) + 1
+        return counts
 
-        if not split_edges:
-            return segments
-
-        vertex_index_by_point: Dict[Tuple[float, float], int] = {}
-        vertices: List[Point] = []
-
-        def vertex_for(point: Point) -> int:
-            key = quantize_point(point)
-            existing_index = vertex_index_by_point.get(key)
-            if existing_index is not None:
-                return existing_index
-            new_index = len(vertices)
-            vertex_index_by_point[key] = new_index
-            vertices.append(point)
-            return new_index
-
-        base_edges: List[Tuple[int, int, float]] = []
-        used_vertices: set = set()
-        edge_map: Dict[Tuple[int, int], float] = {}
-        for a, b in split_edges:
-            va = vertex_for(a)
-            vb = vertex_for(b)
-            if va == vb:
+    def overlap_length(
+        segment_list: List[MotionSegment],
+        baseline_counts: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int],
+    ) -> float:
+        """Return total extra length beyond baseline multiplicity."""
+        seen: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int] = {}
+        overlap_total = 0.0
+        for segment in segment_list:
+            if not segment.needle_down or len(segment.points) < 2:
                 continue
-            length = math.dist(vertices[va], vertices[vb])
-            key = (va, vb) if va <= vb else (vb, va)
-            # Keep only the shortest instance of a geometric edge; duplicated
-            # overlaps in the original drawing are treated as optional.
-            prev = edge_map.get(key)
-            if prev is None or length < prev - 1e-9:
-                edge_map[key] = length
-            used_vertices.add(va)
-            used_vertices.add(vb)
+            for index in range(len(segment.points) - 1):
+                start = segment.points[index]
+                end = segment.points[index + 1]
+                if math.isclose(start[0], end[0], abs_tol=1e-9) and math.isclose(
+                    start[1], end[1], abs_tol=1e-9
+                ):
+                    continue
+                start_key = quantize_point(start)
+                end_key = quantize_point(end)
+                if start_key == end_key:
+                    continue
+                canonical = (
+                    start_key if start_key <= end_key else end_key,
+                    end_key if start_key <= end_key else start_key,
+                )
+                length = math.dist(start, end)
+                current_count = seen.get(canonical, 0) + 1
+                baseline = baseline_counts.get(canonical, 0)
+                if current_count > baseline:
+                    overlap_total += length
+                seen[canonical] = current_count
+        return overlap_total
 
-        for (va, vb), length in edge_map.items():
-            base_edges.append((va, vb, length))
+    def segment_intersections(a: Point, b: Point, c: Point, d: Point) -> List[Point]:
+        """Return intersection points between two closed segments."""
+        def _on_segment(p: Point, q: Point, r: Point) -> bool:
+            return min(p[0], r[0]) - 1e-9 <= q[0] <= max(p[0], r[0]) + 1e-9 and min(p[1], r[1]) - 1e-9 <= q[1] <= max(p[1], r[1]) + 1e-9
 
-        if not base_edges:
-            return segments
+        def _orient(p: Point, q: Point, r: Point) -> float:
+            return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
 
-        # Baseline counts: each unique stitched sub-edge must appear at least once
-        # (duplicate overlaps in the original drawing are treated as optional).
-        baseline_edge_counts: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int] = {}
-        for vertex_index_a, vertex_index_b, _length in base_edges:
-            pa = quantize_point(vertices[vertex_index_a])
-            pb = quantize_point(vertices[vertex_index_b])
-            key = (pa, pb) if pa <= pb else (pb, pa)
-            if key not in baseline_edge_counts:
-                baseline_edge_counts[key] = 1
+        o1 = _orient(a, b, c)
+        o2 = _orient(a, b, d)
+        o3 = _orient(c, d, a)
+        o4 = _orient(c, d, b)
 
-        vertex_count = len(vertices)
-        adjacency: List[List[Tuple[int, float, int]]] = [[] for _ in range(vertex_count)]
-        for edge_index, (vertex_index_a, vertex_index_b, length) in enumerate(base_edges):
-            adjacency[vertex_index_a].append((vertex_index_b, length, edge_index))
-            adjacency[vertex_index_b].append((vertex_index_a, length, edge_index))
+        points: List[Point] = []
 
-        # Ensure the stitched graph is a single connected component.
-        starting_vertex = next(iter(used_vertices))
-        visited_vertices: set = set()
-        stack: List[int] = [starting_vertex]
-        while stack:
-            current_vertex = stack.pop()
-            if current_vertex in visited_vertices:
+        # General intersection
+        if (o1 == 0 and _on_segment(a, c, b)) or (o2 == 0 and _on_segment(a, d, b)) or (o3 == 0 and _on_segment(c, a, d)) or (o4 == 0 and _on_segment(c, b, d)):
+            if o1 == 0 and _on_segment(a, c, b):
+                points.append(c)
+            if o2 == 0 and _on_segment(a, d, b):
+                points.append(d)
+            if o3 == 0 and _on_segment(c, a, d):
+                points.append(a)
+            if o4 == 0 and _on_segment(c, b, d):
+                points.append(b)
+
+        denom = (a[0] - b[0]) * (c[1] - d[1]) - (a[1] - b[1]) * (c[0] - d[0])
+        if abs(denom) > 1e-12:
+            t = ((a[0] - c[0]) * (c[1] - d[1]) - (a[1] - c[1]) * (c[0] - d[0])) / denom
+            u = ((a[0] - c[0]) * (a[1] - b[1]) - (a[1] - c[1]) * (a[0] - b[0])) / denom
+            if -1e-9 <= t <= 1 + 1e-9 and -1e-9 <= u <= 1 + 1e-9:
+                px = a[0] + t * (b[0] - a[0])
+                py = a[1] + t * (b[1] - a[1])
+                points.append((px, py))
+
+        if not points:
+            return []
+        # Deduplicate near-coincident points
+        unique: List[Point] = []
+        for p in points:
+            if not any(math.isclose(p[0], q[0], abs_tol=1e-9) and math.isclose(p[1], q[1], abs_tol=1e-9) for q in unique):
+                unique.append(p)
+        return unique
+
+    stitched_segments = [
+        segment
+        for segment in segments
+        if segment.needle_down and len(segment.points) >= 2
+    ]
+    if not stitched_segments:
+        return segments
+
+    # Flatten to raw edges and split at every intersection so the optimiser
+    # can choose alternate routes through intersection nodes.
+    raw_edges: List[Tuple[Point, Point]] = []
+    for segment in stitched_segments:
+        for idx in range(len(segment.points) - 1):
+            a = segment.points[idx]
+            b = segment.points[idx + 1]
+            if math.isclose(a[0], b[0], abs_tol=1e-9) and math.isclose(a[1], b[1], abs_tol=1e-9):
                 continue
-            visited_vertices.add(current_vertex)
-            for neighbour_vertex, _length, _edge_index in adjacency[current_vertex]:
-                if neighbour_vertex not in visited_vertices:
-                    stack.append(neighbour_vertex)
-        if visited_vertices != used_vertices:
-            return segments
+            raw_edges.append((a, b))
 
-        degrees: List[int] = [0] * vertex_count
-        for vertex_index_a, vertex_index_b, _length in base_edges:
-            degrees[vertex_index_a] += 1
-            degrees[vertex_index_b] += 1
-        odd_vertices: List[int] = [
-            index for index, degree in enumerate(degrees) if degree % 2 == 1
-        ]
+    if not raw_edges:
+        return segments
 
-        def shortest_paths(source_vertex: int) -> Tuple[List[float], List[Optional[int]]]:
-            distances: List[float] = [float("inf")] * vertex_count
-            previous_vertices: List[Optional[int]] = [None] * vertex_count
-            distances[source_vertex] = 0.0
-            heap: List[Tuple[float, int]] = [(0.0, source_vertex)]
-            while heap:
-                distance, vertex_index_current = heapq.heappop(heap)
-                if distance > distances[vertex_index_current] + 1e-12:
-                    continue
-                for neighbour_vertex, edge_length, _edge_index in adjacency[vertex_index_current]:
-                    new_distance = distance + edge_length
-                    if new_distance + 1e-12 < distances[neighbour_vertex]:
-                        distances[neighbour_vertex] = new_distance
-                        previous_vertices[neighbour_vertex] = vertex_index_current
-                        heapq.heappush(heap, (new_distance, neighbour_vertex))
-            return distances, previous_vertices
-
-        # Track how many times each base edge is duplicated when fixing parity.
-        duplicate_paths: List[List[int]] = []
-
-        # Determine desired end-point parities so that the final walk keeps the
-        # same logical start and end locations as the original motion path.
-        if start_point is not None:
-            start_key = quantize_point(start_point)
-            start_vertex_index = vertex_index_by_point.get(start_key, starting_vertex)
-        else:
-            start_vertex_index = starting_vertex
-
-        if end_point is not None:
-            end_key = quantize_point(end_point)
-            end_vertex_index = vertex_index_by_point.get(end_key, start_vertex_index)
-        else:
-            end_vertex_index = start_vertex_index
-
-        target_odd: set = set()
-        if start_vertex_index != end_vertex_index:
-            target_odd = {start_vertex_index, end_vertex_index}
-
-        required_parity_vertices = set(odd_vertices) ^ target_odd
-
-        required_count = len(required_parity_vertices)
-        if required_count % 2 != 0:
-            # Should not happen in a valid undirected graph, but guard anyway.
-            return segments
-
-        def shortest_path_with_trace(source_vertex_index: int, target_vertex_index: int) -> Tuple[float, List[int]]:
-            distances: List[float] = [float("inf")] * vertex_count
-            previous_vertices: List[Optional[int]] = [None] * vertex_count
-            previous_edge: List[Optional[int]] = [None] * vertex_count
-            distances[source_vertex_index] = 0.0
-            heap: List[Tuple[float, int]] = [(0.0, source_vertex_index)]
-
-            while heap:
-                distance, vertex_index_current = heapq.heappop(heap)
-                if distance > distances[vertex_index_current] + 1e-12:
-                    continue
-                if vertex_index_current == target_vertex_index:
-                    break
-                for neighbour_vertex, edge_length, edge_index in adjacency[vertex_index_current]:
-                    new_distance = distance + edge_length
-                    if new_distance + 1e-12 < distances[neighbour_vertex]:
-                        distances[neighbour_vertex] = new_distance
-                        previous_vertices[neighbour_vertex] = vertex_index_current
-                        previous_edge[neighbour_vertex] = edge_index
-                        heapq.heappush(heap, (new_distance, neighbour_vertex))
-
-            if not math.isfinite(distances[target_vertex_index]):
-                return float("inf"), []
-
-            path_edges: List[int] = []
-            current_vertex = target_vertex_index
-            while current_vertex != source_vertex_index:
-                prev = previous_vertices[current_vertex]
-                edge_index = previous_edge[current_vertex]
-                if prev is None or edge_index is None:
-                    return float("inf"), []
-                path_edges.append(edge_index)
-                current_vertex = prev
-            path_edges.reverse()
-            return distances[target_vertex_index], path_edges
-
-        if 0 < required_count <= 16:
-            # Exact minimum-weight perfect matching via DP (Held-Karp style).
-            required_vertices_sorted = sorted(required_parity_vertices)
-            m = len(required_vertices_sorted)
-            # Precompute pairwise shortest paths.
-            pair_costs: Dict[Tuple[int, int], Tuple[float, List[int]]] = {}
-            for i in range(m):
-                for j in range(i + 1, m):
-                    u = required_vertices_sorted[i]
-                    v = required_vertices_sorted[j]
-                    dist, path_edges = shortest_path_with_trace(u, v)
-                    pair_costs[(i, j)] = (dist, path_edges)
-
-            full_mask = (1 << m) - 1
-            dp: List[float] = [float("inf")] * (1 << m)
-            choice: List[Optional[Tuple[int, int]]] = [None] * (1 << m)
-            dp[0] = 0.0
-
-            for mask in range(1 << m):
-                if dp[mask] == float("inf"):
-                    continue
-                # Find first unmatched vertex.
-                try:
-                    first = next(idx for idx in range(m) if not (mask & (1 << idx)))
-                except StopIteration:
-                    continue
-                for second in range(first + 1, m):
-                    if mask & (1 << second):
-                        continue
-                    pair = (first, second)
-                    cost, _path_edges = pair_costs.get(pair, (float("inf"), []))
-                    if not math.isfinite(cost) or not _path_edges:
-                        continue
-                    next_mask = mask | (1 << first) | (1 << second)
-                    new_cost = dp[mask] + cost
-                    if new_cost < dp[next_mask] - 1e-12:
-                        dp[next_mask] = new_cost
-                        choice[next_mask] = pair
-
-            if dp[full_mask] == float("inf"):
-                return segments
-
-            # Reconstruct chosen pairs.
-            mask = full_mask
-            chosen_pairs: List[Tuple[int, int]] = []
-            while mask:
-                pair = choice[mask]
-                if pair is None:
-                    break
-                chosen_pairs.append(pair)
-                mask &= ~(1 << pair[0])
-                mask &= ~(1 << pair[1])
-
-            duplicate_paths: List[List[int]] = []
-            for first, second in chosen_pairs:
-                u = required_vertices_sorted[first]
-                v = required_vertices_sorted[second]
-                cost, path_edges = pair_costs[(first, second)]
-                if not path_edges or not math.isfinite(cost):
-                    return segments
-                duplicate_paths.append(path_edges)
-
-        elif 16 < required_count <= 24:
-            # Greedy pairing for larger sets to keep runtime bounded.
-            remaining_vertices = set(required_parity_vertices)
-            while remaining_vertices:
-                candidates = sorted(remaining_vertices)
-                best_pair: Optional[Tuple[int, int]] = None
-                best_cost = float("inf")
-                best_path_edges: List[int] = []
-
-                for i in range(len(candidates)):
-                    u = candidates[i]
-                    for j in range(i + 1, len(candidates)):
-                        v = candidates[j]
-                        cost, path_edges = shortest_path_with_trace(u, v)
-                        if not path_edges or not math.isfinite(cost):
-                            continue
-                        if cost < best_cost:
-                            best_cost = cost
-                            best_pair = (u, v)
-                            best_path_edges = path_edges
-
-                if best_pair is None or not best_path_edges:
-                    return segments
-
-                duplicate_paths.append(best_path_edges)
-                remaining_vertices.remove(best_pair[0])
-                remaining_vertices.remove(best_pair[1])
-        elif required_count > 24:
-            return segments
-
-        extended_edges: List[Tuple[int, int, float]] = list(base_edges)
-        for path_edges in duplicate_paths:
-            for edge_index in path_edges:
-                base_vertex_a, base_vertex_b, base_length = base_edges[edge_index]
-                extended_edges.append((base_vertex_a, base_vertex_b, base_length))
-
-        adjacency_multigraph: List[List[Tuple[int, int]]] = [
-            [] for _ in range(vertex_count)
-        ]
-        for edge_index, (vertex_index_a, vertex_index_b, _length) in enumerate(
-            extended_edges
-        ):
-            adjacency_multigraph[vertex_index_a].append((vertex_index_b, edge_index))
-            adjacency_multigraph[vertex_index_b].append((vertex_index_a, edge_index))
-
-        used_edges: List[bool] = [False] * len(extended_edges)
-
-        stack_vertices: List[int] = [start_vertex_index]
-        euler_vertices: List[int] = []
-
-        while stack_vertices:
-            vertex_index_current = stack_vertices[-1]
-            adjacency_list = adjacency_multigraph[vertex_index_current]
-            while adjacency_list and used_edges[adjacency_list[-1][1]]:
-                adjacency_list.pop()
-            if not adjacency_list:
-                euler_vertices.append(stack_vertices.pop())
-            else:
-                neighbour_vertex, edge_index = adjacency_list.pop()
-                if used_edges[edge_index]:
-                    continue
-                used_edges[edge_index] = True
-                stack_vertices.append(neighbour_vertex)
-
-        euler_vertices.reverse()
-        if not euler_vertices:
-            return segments
-
-        optimized_points: List[Point] = []
-        for vertex_index_current in euler_vertices:
-            point = vertices[vertex_index_current]
-            if not optimized_points:
-                optimized_points.append(point)
+    split_points: List[List[Point]] = [[edge[0], edge[1]] for edge in raw_edges]
+    for i in range(len(raw_edges)):
+        for j in range(i + 1, len(raw_edges)):
+            p1, p2 = raw_edges[i]
+            p3, p4 = raw_edges[j]
+            pts = segment_intersections(p1, p2, p3, p4)
+            if not pts:
                 continue
-            last_point = optimized_points[-1]
-            if math.isclose(point[0], last_point[0], abs_tol=tolerance) and math.isclose(
-                point[1], last_point[1], abs_tol=tolerance
+            split_points[i].extend(pts)
+            split_points[j].extend(pts)
+
+    split_edges: List[Tuple[Point, Point]] = []
+    for idx, edge in enumerate(raw_edges):
+        a, b = edge
+        pts = split_points[idx]
+        # Sort points along the edge using projection parameter.
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        def param(pt: Point) -> float:
+            length_sq = dx * dx + dy * dy
+            if length_sq <= 0:
+                return 0.0
+            return ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / length_sq
+        pts_sorted = sorted(pts, key=param)
+        # Create sub-edges.
+        for i in range(1, len(pts_sorted)):
+            p_start = pts_sorted[i - 1]
+            p_end = pts_sorted[i]
+            if math.isclose(p_start[0], p_end[0], abs_tol=1e-9) and math.isclose(
+                p_start[1], p_end[1], abs_tol=1e-9
             ):
                 continue
-            optimized_points.append(point)
+            split_edges.append((p_start, p_end))
 
-        if len(optimized_points) < 2:
+    if not split_edges:
+        return segments
+
+    vertex_index_by_point: Dict[Tuple[float, float], int] = {}
+    vertices: List[Point] = []
+
+    def vertex_for(point: Point) -> int:
+        key = quantize_point(point)
+        existing_index = vertex_index_by_point.get(key)
+        if existing_index is not None:
+            return existing_index
+        new_index = len(vertices)
+        vertex_index_by_point[key] = new_index
+        vertices.append(point)
+        return new_index
+
+    base_edges: List[Tuple[int, int, float]] = []
+    used_vertices: set = set()
+    edge_map: Dict[Tuple[int, int], float] = {}
+    for a, b in split_edges:
+        va = vertex_for(a)
+        vb = vertex_for(b)
+        if va == vb:
+            continue
+        length = math.dist(vertices[va], vertices[vb])
+        key = (va, vb) if va <= vb else (vb, va)
+        # Keep only the shortest instance of a geometric edge; duplicated
+        # overlaps in the original drawing are treated as optional.
+        prev = edge_map.get(key)
+        if prev is None or length < prev - 1e-9:
+            edge_map[key] = length
+        used_vertices.add(va)
+        used_vertices.add(vb)
+
+    for (va, vb), length in edge_map.items():
+        base_edges.append((va, vb, length))
+
+    if not base_edges:
+        return segments
+
+    # Baseline counts: each unique stitched sub-edge must appear at least once
+    # (duplicate overlaps in the original drawing are treated as optional).
+    baseline_edge_counts: Dict[Tuple[Tuple[float, float], Tuple[float, float]], int] = {}
+    for vertex_index_a, vertex_index_b, _length in base_edges:
+        pa = quantize_point(vertices[vertex_index_a])
+        pb = quantize_point(vertices[vertex_index_b])
+        key = (pa, pb) if pa <= pb else (pb, pa)
+        if key not in baseline_edge_counts:
+            baseline_edge_counts[key] = 1
+
+    vertex_count = len(vertices)
+    adjacency: List[List[Tuple[int, float, int]]] = [[] for _ in range(vertex_count)]
+    for edge_index, (vertex_index_a, vertex_index_b, length) in enumerate(base_edges):
+        adjacency[vertex_index_a].append((vertex_index_b, length, edge_index))
+        adjacency[vertex_index_b].append((vertex_index_a, length, edge_index))
+
+    # Ensure the stitched graph is a single connected component.
+    starting_vertex = next(iter(used_vertices))
+    visited_vertices: set = set()
+    stack: List[int] = [starting_vertex]
+    while stack:
+        current_vertex = stack.pop()
+        if current_vertex in visited_vertices:
+            continue
+        visited_vertices.add(current_vertex)
+        for neighbour_vertex, _length, _edge_index in adjacency[current_vertex]:
+            if neighbour_vertex not in visited_vertices:
+                stack.append(neighbour_vertex)
+    if visited_vertices != used_vertices:
+        return segments
+
+    degrees: List[int] = [0] * vertex_count
+    for vertex_index_a, vertex_index_b, _length in base_edges:
+        degrees[vertex_index_a] += 1
+        degrees[vertex_index_b] += 1
+    odd_vertices: List[int] = [
+        index for index, degree in enumerate(degrees) if degree % 2 == 1
+    ]
+
+    def shortest_paths(source_vertex: int) -> Tuple[List[float], List[Optional[int]]]:
+        distances: List[float] = [float("inf")] * vertex_count
+        previous_vertices: List[Optional[int]] = [None] * vertex_count
+        distances[source_vertex] = 0.0
+        heap: List[Tuple[float, int]] = [(0.0, source_vertex)]
+        while heap:
+            distance, vertex_index_current = heapq.heappop(heap)
+            if distance > distances[vertex_index_current] + 1e-12:
+                continue
+            for neighbour_vertex, edge_length, _edge_index in adjacency[vertex_index_current]:
+                new_distance = distance + edge_length
+                if new_distance + 1e-12 < distances[neighbour_vertex]:
+                    distances[neighbour_vertex] = new_distance
+                    previous_vertices[neighbour_vertex] = vertex_index_current
+                    heapq.heappush(heap, (new_distance, neighbour_vertex))
+        return distances, previous_vertices
+
+    # Track how many times each base edge is duplicated when fixing parity.
+    duplicate_paths: List[List[int]] = []
+
+    # Determine desired end-point parities so that the final walk keeps the
+    # same logical start and end locations as the original motion path.
+    if start_point is not None:
+        start_key = quantize_point(start_point)
+        start_vertex_index = vertex_index_by_point.get(start_key, starting_vertex)
+    else:
+        start_vertex_index = starting_vertex
+
+    if end_point is not None:
+        end_key = quantize_point(end_point)
+        end_vertex_index = vertex_index_by_point.get(end_key, start_vertex_index)
+    else:
+        end_vertex_index = start_vertex_index
+
+    target_odd: set = set()
+    if start_vertex_index != end_vertex_index:
+        target_odd = {start_vertex_index, end_vertex_index}
+
+    required_parity_vertices = set(odd_vertices) ^ target_odd
+
+    required_count = len(required_parity_vertices)
+    if required_count % 2 != 0:
+        # Should not happen in a valid undirected graph, but guard anyway.
+        return segments
+
+    def shortest_path_with_trace(source_vertex_index: int, target_vertex_index: int) -> Tuple[float, List[int]]:
+        distances: List[float] = [float("inf")] * vertex_count
+        previous_vertices: List[Optional[int]] = [None] * vertex_count
+        previous_edge: List[Optional[int]] = [None] * vertex_count
+        distances[source_vertex_index] = 0.0
+        heap: List[Tuple[float, int]] = [(0.0, source_vertex_index)]
+
+        while heap:
+            distance, vertex_index_current = heapq.heappop(heap)
+            if distance > distances[vertex_index_current] + 1e-12:
+                continue
+            if vertex_index_current == target_vertex_index:
+                break
+            for neighbour_vertex, edge_length, edge_index in adjacency[vertex_index_current]:
+                new_distance = distance + edge_length
+                if new_distance + 1e-12 < distances[neighbour_vertex]:
+                    distances[neighbour_vertex] = new_distance
+                    previous_vertices[neighbour_vertex] = vertex_index_current
+                    previous_edge[neighbour_vertex] = edge_index
+                    heapq.heappush(heap, (new_distance, neighbour_vertex))
+
+        if not math.isfinite(distances[target_vertex_index]):
+            return float("inf"), []
+
+        path_edges: List[int] = []
+        current_vertex = target_vertex_index
+        while current_vertex != source_vertex_index:
+            prev = previous_vertices[current_vertex]
+            edge_index = previous_edge[current_vertex]
+            if prev is None or edge_index is None:
+                return float("inf"), []
+            path_edges.append(edge_index)
+            current_vertex = prev
+        path_edges.reverse()
+        return distances[target_vertex_index], path_edges
+
+    if 0 < required_count <= 16:
+        # Exact minimum-weight perfect matching via DP (Held-Karp style).
+        required_vertices_sorted = sorted(required_parity_vertices)
+        m = len(required_vertices_sorted)
+        # Precompute pairwise shortest paths.
+        pair_costs: Dict[Tuple[int, int], Tuple[float, List[int]]] = {}
+        for i in range(m):
+            for j in range(i + 1, m):
+                u = required_vertices_sorted[i]
+                v = required_vertices_sorted[j]
+                dist, path_edges = shortest_path_with_trace(u, v)
+                pair_costs[(i, j)] = (dist, path_edges)
+
+        full_mask = (1 << m) - 1
+        dp: List[float] = [float("inf")] * (1 << m)
+        choice: List[Optional[Tuple[int, int]]] = [None] * (1 << m)
+        dp[0] = 0.0
+
+        for mask in range(1 << m):
+            if dp[mask] == float("inf"):
+                continue
+            # Find first unmatched vertex.
+            try:
+                first = next(idx for idx in range(m) if not (mask & (1 << idx)))
+            except StopIteration:
+                continue
+            for second in range(first + 1, m):
+                if mask & (1 << second):
+                    continue
+                pair = (first, second)
+                cost, _path_edges = pair_costs.get(pair, (float("inf"), []))
+                if not math.isfinite(cost) or not _path_edges:
+                    continue
+                next_mask = mask | (1 << first) | (1 << second)
+                new_cost = dp[mask] + cost
+                if new_cost < dp[next_mask] - 1e-12:
+                    dp[next_mask] = new_cost
+                    choice[next_mask] = pair
+
+        if dp[full_mask] == float("inf"):
             return segments
 
-        optimized_segment = MotionSegment(points=optimized_points, needle_down=True)
-        optimized_segments: List[MotionSegment] = []
-        inserted_stitched_segment = False
-        for segment in segments:
-            if segment.needle_down and len(segment.points) >= 2:
-                if not inserted_stitched_segment:
-                    optimized_segments.append(optimized_segment)
-                    inserted_stitched_segment = True
-                continue
-            optimized_segments.append(segment)
+        # Reconstruct chosen pairs.
+        mask = full_mask
+        chosen_pairs: List[Tuple[int, int]] = []
+        while mask:
+            pair = choice[mask]
+            if pair is None:
+                break
+            chosen_pairs.append(pair)
+            mask &= ~(1 << pair[0])
+            mask &= ~(1 << pair[1])
 
-        optimized_edge_counts = stitched_edge_counts(optimized_segments)
-        for edge_key, baseline_count in baseline_edge_counts.items():
-            if optimized_edge_counts.get(edge_key, 0) < baseline_count:
-                # Missing required geometry from the original design.
+        duplicate_paths: List[List[int]] = []
+        for first, second in chosen_pairs:
+            u = required_vertices_sorted[first]
+            v = required_vertices_sorted[second]
+            cost, path_edges = pair_costs[(first, second)]
+            if not path_edges or not math.isfinite(cost):
+                return segments
+            duplicate_paths.append(path_edges)
+
+    elif 16 < required_count <= 24:
+        # Greedy pairing for larger sets to keep runtime bounded.
+        remaining_vertices = set(required_parity_vertices)
+        while remaining_vertices:
+            candidates = sorted(remaining_vertices)
+            best_pair: Optional[Tuple[int, int]] = None
+            best_cost = float("inf")
+            best_path_edges: List[int] = []
+
+            for i in range(len(candidates)):
+                u = candidates[i]
+                for j in range(i + 1, len(candidates)):
+                    v = candidates[j]
+                    cost, path_edges = shortest_path_with_trace(u, v)
+                    if not path_edges or not math.isfinite(cost):
+                        continue
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_pair = (u, v)
+                        best_path_edges = path_edges
+
+            if best_pair is None or not best_path_edges:
                 return segments
 
-        original_overlap = overlap_length(segments, baseline_edge_counts)
-        optimized_overlap = overlap_length(optimized_segments, baseline_edge_counts)
+            duplicate_paths.append(best_path_edges)
+            remaining_vertices.remove(best_pair[0])
+            remaining_vertices.remove(best_pair[1])
+    elif required_count > 24:
+        return segments
 
-        if optimized_overlap + tolerance >= original_overlap:
+    extended_edges: List[Tuple[int, int, float]] = list(base_edges)
+    for path_edges in duplicate_paths:
+        for edge_index in path_edges:
+            base_vertex_a, base_vertex_b, base_length = base_edges[edge_index]
+            extended_edges.append((base_vertex_a, base_vertex_b, base_length))
+
+    adjacency_multigraph: List[List[Tuple[int, int]]] = [
+        [] for _ in range(vertex_count)
+    ]
+    for edge_index, (vertex_index_a, vertex_index_b, _length) in enumerate(
+        extended_edges
+    ):
+        adjacency_multigraph[vertex_index_a].append((vertex_index_b, edge_index))
+        adjacency_multigraph[vertex_index_b].append((vertex_index_a, edge_index))
+
+    used_edges: List[bool] = [False] * len(extended_edges)
+
+    stack_vertices: List[int] = [start_vertex_index]
+    euler_vertices: List[int] = []
+
+    while stack_vertices:
+        vertex_index_current = stack_vertices[-1]
+        adjacency_list = adjacency_multigraph[vertex_index_current]
+        while adjacency_list and used_edges[adjacency_list[-1][1]]:
+            adjacency_list.pop()
+        if not adjacency_list:
+            euler_vertices.append(stack_vertices.pop())
+        else:
+            neighbour_vertex, edge_index = adjacency_list.pop()
+            if used_edges[edge_index]:
+                continue
+            used_edges[edge_index] = True
+            stack_vertices.append(neighbour_vertex)
+
+    euler_vertices.reverse()
+    if not euler_vertices:
+        return segments
+
+    optimized_points: List[Point] = []
+    for vertex_index_current in euler_vertices:
+        point = vertices[vertex_index_current]
+        if not optimized_points:
+            optimized_points.append(point)
+            continue
+        last_point = optimized_points[-1]
+        if math.isclose(point[0], last_point[0], abs_tol=tolerance) and math.isclose(
+            point[1], last_point[1], abs_tol=tolerance
+        ):
+            continue
+        optimized_points.append(point)
+
+    if len(optimized_points) < 2:
+        return segments
+
+    optimized_segment = MotionSegment(points=optimized_points, needle_down=True)
+    optimized_segments: List[MotionSegment] = []
+    inserted_stitched_segment = False
+    for segment in segments:
+        if segment.needle_down and len(segment.points) >= 2:
+            if not inserted_stitched_segment:
+                optimized_segments.append(optimized_segment)
+                inserted_stitched_segment = True
+            continue
+        optimized_segments.append(segment)
+
+    optimized_edge_counts = stitched_edge_counts(optimized_segments)
+    for edge_key, baseline_count in baseline_edge_counts.items():
+        if optimized_edge_counts.get(edge_key, 0) < baseline_count:
+            # Missing required geometry from the original design.
             return segments
 
-        return optimized_segments
+    original_overlap = overlap_length(segments, baseline_edge_counts)
+    optimized_overlap = overlap_length(optimized_segments, baseline_edge_counts)
+
+    if optimized_overlap + tolerance >= original_overlap:
+        return segments
+
+    return optimized_segments
 
 
-    class QuiltPreviewWindow(Gtk.Window):  # type: ignore[misc]
-        """Interactive GTK window that previews and exports the motion path."""
+if TK_AVAILABLE:
+    class QuiltPreviewWindow:
+        """Interactive Tk window that previews and exports the motion path."""
 
         BASE_SPEED_MM_PER_SEC = 35.0
 
@@ -857,8 +848,6 @@ if GTK_AVAILABLE:
             model: MotionPathModel,
             exporters: Dict[str, ExportProfile],
         ) -> None:
-            super().__init__(title=_("Quilt Motion Preview"))
-            self.set_default_size(1100, 600)
             self.model = model
             self.exporters = exporters
 
@@ -866,13 +855,10 @@ if GTK_AVAILABLE:
             self.speed_multiplier = 1.0
             self.playing = True
             self.last_tick: Optional[float] = None
-            self._timeout_id: Optional[int] = None
-            self._static_surface: Optional[cairo.ImageSurface] = None
-            self._static_surface_size: Tuple[int, int] = (0, 0)
-            self._surface_dirty = True
+            self._tick_after_id: Optional[str] = None
             self._viewport: Optional[Tuple[float, float, float]] = None
-            self._prime_source: Optional[int] = None
             self._updating_progress_slider = False
+            self._redraw_pending = False
 
             # Pantograph defaults
             self.repeat_count = 2
@@ -889,244 +875,140 @@ if GTK_AVAILABLE:
             self.mirror_alternate_rows_vertical = False
             self.export_entire_layout = False
 
+            self.root = tk.Tk()
+            self.root.title(_("Quilt Motion Preview"))
+            self.root.geometry("1100x600")
+            self.root.protocol("WM_DELETE_WINDOW", self._on_destroy)
+
             self._build_ui()
             self._refresh_y_warning()
-            self.connect("destroy", self._on_destroy)
-            self._timeout_id = GLib.timeout_add(16, self._tick)
-            self._prime_source = GLib.idle_add(self._prime_surface)
+            self._schedule_tick()
+            self._schedule_redraw()
+
+        def present(self) -> None:
+            self.root.mainloop()
 
         def _build_ui(self) -> None:
-            root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-            root.set_margin_top(12)
-            root.set_margin_bottom(12)
-            root.set_margin_start(12)
-            root.set_margin_end(12)
-            self.add(root)
+            self.root.columnconfigure(0, weight=1)
+            self.root.rowconfigure(0, weight=1)
 
-            left_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-            left_column.set_hexpand(True)
-            left_column.set_vexpand(True)
-            root.pack_start(left_column, True, True, 0)
+            main = ttk.Frame(self.root, padding=12)
+            main.grid(row=0, column=0, sticky="nsew")
+            main.columnconfigure(0, weight=1)
+            main.rowconfigure(0, weight=1)
 
-            self.drawing_area = Gtk.DrawingArea()
-            self.drawing_area.set_hexpand(True)
-            self.drawing_area.set_vexpand(True)
-            self.drawing_area.connect("draw", self._on_draw)
-            self.drawing_area.connect("size-allocate", self._on_size_allocate)
-            left_column.pack_start(self.drawing_area, True, True, 0)
+            left_column = ttk.Frame(main)
+            left_column.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+            left_column.columnconfigure(0, weight=1)
+            left_column.rowconfigure(0, weight=1)
 
-            self.y_warning_label = Gtk.Label()
-            self.y_warning_label.set_xalign(0.0)
-            self.y_warning_label.set_use_markup(True)
-            left_column.pack_start(self.y_warning_label, False, False, 0)
+            self.canvas = tk.Canvas(left_column, background="#f8f8f8", highlightthickness=1)
+            self.canvas.grid(row=0, column=0, sticky="nsew")
+            self.canvas.bind("<Configure>", self._on_canvas_resize)
 
-            sidebar = Gtk.Box(
-                orientation=Gtk.Orientation.VERTICAL, spacing=8
-            )
-            sidebar.set_size_request(280, -1)
-            root.pack_start(sidebar, False, False, 0)
+            self.y_warning_label = ttk.Label(left_column, foreground="#b8860b")
+            self.y_warning_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
 
-            controls = Gtk.Box(spacing=6)
-            sidebar.pack_start(controls, False, False, 0)
+            sidebar = ttk.Frame(main, width=280)
+            sidebar.grid(row=0, column=1, sticky="ns")
+            sidebar.columnconfigure(0, weight=1)
 
-            self.play_button = Gtk.Button(label=_("Pause"))
-            self.play_button.connect("clicked", self._toggle_play)
-            controls.pack_start(self.play_button, True, True, 0)
+            controls = ttk.Frame(sidebar)
+            controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+            controls.columnconfigure((0, 1, 2), weight=1)
 
-            restart_button = Gtk.Button(label=_("Restart"))
-            restart_button.connect("clicked", self._restart)
-            controls.pack_start(restart_button, True, True, 0)
+            self.play_button = ttk.Button(controls, text=_("Pause"), command=self._toggle_play)
+            self.play_button.grid(row=0, column=0, sticky="ew")
 
-            optimize_button = Gtk.Button(label=_("Optimize path"))
-            optimize_button.connect("clicked", self._optimize_path)
-            controls.pack_start(optimize_button, True, True, 0)
-            self.optimize_button = optimize_button
+            restart_button = ttk.Button(controls, text=_("Restart"), command=self._restart)
+            restart_button.grid(row=0, column=1, sticky="ew", padx=4)
 
-            speed_label = Gtk.Label(label=_("Preview speed"))
-            speed_label.set_xalign(0.0)
-            sidebar.pack_start(speed_label, False, False, 0)
+            self.optimize_button = ttk.Button(controls, text=_("Optimize path"), command=self._optimize_path)
+            self.optimize_button.grid(row=0, column=2, sticky="ew")
 
-            adjustment = Gtk.Adjustment(
-                value=1.0,
-                lower=0.1,
-                upper=5.0,
-                step_increment=0.1,
-                page_increment=0.5,
-                page_size=0.0,
-            )
-            self.speed_slider = Gtk.Scale(
-                orientation=Gtk.Orientation.HORIZONTAL, adjustment=adjustment
-            )
-            self.speed_slider.connect("value-changed", self._on_speed_changed)
-            self.speed_slider.set_value(1.0)
-            sidebar.pack_start(self.speed_slider, False, False, 0)
+            ttk.Label(sidebar, text=_("Preview speed")).grid(row=1, column=0, sticky="w")
+            self.speed_var = tk.DoubleVar(value=1.0)
+            self.speed_slider = ttk.Scale(sidebar, from_=0.1, to=5.0, orient="horizontal", variable=self.speed_var, command=self._on_speed_changed)
+            self.speed_slider.grid(row=2, column=0, sticky="ew")
+            self.speed_value_label = ttk.Label(sidebar, text=_("1.00×"))
+            self.speed_value_label.grid(row=3, column=0, sticky="w", pady=(0, 6))
 
-            self.speed_value_label = Gtk.Label(label=_("1.00×"))
-            self.speed_value_label.set_xalign(0.0)
-            sidebar.pack_start(self.speed_value_label, False, False, 0)
+            ttk.Label(sidebar, text=_("Preview progress")).grid(row=4, column=0, sticky="w")
+            self.progress_var = tk.DoubleVar(value=0.0)
+            self.progress_slider = ttk.Scale(sidebar, from_=0.0, to=100.0, orient="horizontal", variable=self.progress_var, command=self._on_progress_slider_changed)
+            self.progress_slider.grid(row=5, column=0, sticky="ew")
 
-            progress_label = Gtk.Label(label=_("Preview progress"))
-            progress_label.set_xalign(0.0)
-            sidebar.pack_start(progress_label, False, False, 0)
+            self.preview_status = ttk.Label(sidebar, text="", width=50)
+            self.preview_status.grid(row=6, column=0, sticky="w", pady=(0, 8))
 
-            progress_adjustment = Gtk.Adjustment(
-                value=0.0,
-                lower=0.0,
-                upper=100.0,
-                step_increment=0.1,
-                page_increment=1.0,
-                page_size=0.0,
-            )
-            self.progress_slider = Gtk.Scale(
-                orientation=Gtk.Orientation.HORIZONTAL, adjustment=progress_adjustment
-            )
-            self.progress_slider.set_digits(1)
-            self.progress_slider.connect("value-changed", self._on_progress_slider_changed)
-            sidebar.pack_start(self.progress_slider, False, False, 0)
+            ttk.Separator(sidebar, orient="horizontal").grid(row=7, column=0, sticky="ew", pady=6)
 
-            self.preview_status = Gtk.Label()
-            self.preview_status.set_xalign(0.0)
-            self.preview_status.set_width_chars(50)
-            self.preview_status.set_max_width_chars(50)
-            self.preview_status.set_line_wrap(False)
-            self.preview_status.set_ellipsize(Pango.EllipsizeMode.END)
-            sidebar.pack_start(self.preview_status, False, False, 0)
+            ttk.Label(sidebar, text=_("Pantograph layout")).grid(row=8, column=0, sticky="w")
+            pantograph = ttk.Frame(sidebar)
+            pantograph.grid(row=9, column=0, sticky="ew")
+            pantograph.columnconfigure(1, weight=1)
 
-            sidebar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 4)
+            self.repeat_var = tk.IntVar(value=self.repeat_count)
+            ttk.Label(pantograph, text=_("Repeats")).grid(row=0, column=0, sticky="w")
+            repeat_spin = ttk.Spinbox(pantograph, from_=1, to=20, textvariable=self.repeat_var, width=5, command=self._on_repeat_changed)
+            repeat_spin.grid(row=0, column=1, sticky="w")
 
-            pantograph_label = Gtk.Label(label=_("Pantograph layout"))
-            pantograph_label.set_xalign(0.0)
-            sidebar.pack_start(pantograph_label, False, False, 0)
+            self.rows_var = tk.IntVar(value=self.row_count)
+            ttk.Label(pantograph, text=_("Rows")).grid(row=1, column=0, sticky="w")
+            rows_spin = ttk.Spinbox(pantograph, from_=1, to=20, textvariable=self.rows_var, width=5, command=self._on_rows_changed)
+            rows_spin.grid(row=1, column=1, sticky="w")
 
-            pantograph_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
-            sidebar.pack_start(pantograph_grid, False, False, 0)
+            self.row_distance_var = tk.DoubleVar(value=self.row_distance_mm)
+            ttk.Label(pantograph, text=_("Row distance (mm)")).grid(row=2, column=0, sticky="w")
+            row_distance_spin = ttk.Spinbox(pantograph, from_=1.0, to=5000.0, increment=1.0, textvariable=self.row_distance_var, width=7, command=self._on_row_distance_changed)
+            row_distance_spin.grid(row=2, column=1, sticky="w")
+            self.row_distance_spin = row_distance_spin
 
-            repeat_spin = Gtk.SpinButton(
-                adjustment=Gtk.Adjustment(
-                    value=2,
-                    lower=1,
-                    upper=20,
-                    step_increment=1,
-                    page_increment=2,
-                    page_size=0,
-                ),
-                numeric=True,
-            )
-            repeat_spin.set_value(self.repeat_count)
-            repeat_spin.connect("value-changed", self._on_repeat_changed)
-            pantograph_grid.attach(Gtk.Label(label=_("Repeats"), xalign=0), 0, 0, 1, 1)
-            pantograph_grid.attach(repeat_spin, 1, 0, 1, 1)
-            self.repeat_spin = repeat_spin
+            self.stagger_var = tk.BooleanVar(value=self.stagger)
+            stagger_toggle = ttk.Checkbutton(pantograph, text=_("Stagger alternate rows"), variable=self.stagger_var, command=self._on_stagger_toggled)
+            stagger_toggle.grid(row=3, column=0, columnspan=2, sticky="w")
 
-            rows_spin = Gtk.SpinButton(
-                adjustment=Gtk.Adjustment(
-                    value=2,
-                    lower=1,
-                    upper=20,
-                    step_increment=1,
-                    page_increment=2,
-                    page_size=0,
-                ),
-                numeric=True,
-            )
-            rows_spin.set_value(self.row_count)
-            rows_spin.connect("value-changed", self._on_rows_changed)
-            pantograph_grid.attach(Gtk.Label(label=_("Rows"), xalign=0), 0, 1, 1, 1)
-            pantograph_grid.attach(rows_spin, 1, 1, 1, 1)
-            self.rows_spin = rows_spin
+            self.stagger_percent_var = tk.DoubleVar(value=self.stagger_percent)
+            ttk.Label(pantograph, text=_("Stagger %")).grid(row=4, column=0, sticky="w")
+            self.stagger_scale = ttk.Scale(pantograph, from_=0.0, to=100.0, orient="horizontal", variable=self.stagger_percent_var, command=self._on_stagger_percent_changed)
+            self.stagger_scale.grid(row=4, column=1, sticky="ew")
 
-            distance_adjustment = Gtk.Adjustment(
-                value=self.row_distance_mm,
-                lower=1.0,
-                upper=5000.0,
-                step_increment=1.0,
-                page_increment=10.0,
-                page_size=0.0,
-            )
-            distance_spin = Gtk.SpinButton(adjustment=distance_adjustment, digits=1)
-            distance_spin.connect("value-changed", self._on_row_distance_changed)
-            pantograph_grid.attach(Gtk.Label(label=_("Row distance (mm)"), xalign=0), 0, 2, 1, 1)
-            pantograph_grid.attach(distance_spin, 1, 2, 1, 1)
-            self.row_distance_spin = distance_spin
+            self.mirror_rows_var = tk.BooleanVar(value=self.mirror_alternate_rows)
+            mirror_toggle = ttk.Checkbutton(pantograph, text=_("Mirror every other row horizontally"), variable=self.mirror_rows_var, command=self._on_mirror_rows_toggled)
+            mirror_toggle.grid(row=5, column=0, columnspan=2, sticky="w")
 
-            stagger_toggle = Gtk.CheckButton(label=_("Stagger alternate rows"))
-            stagger_toggle.set_active(self.stagger)
-            stagger_toggle.connect("toggled", self._on_stagger_toggled)
-            pantograph_grid.attach(stagger_toggle, 0, 3, 2, 1)
-            self.stagger_toggle = stagger_toggle
+            self.mirror_rows_v_var = tk.BooleanVar(value=self.mirror_alternate_rows_vertical)
+            mirror_v_toggle = ttk.Checkbutton(pantograph, text=_("Mirror every other row vertically"), variable=self.mirror_rows_v_var, command=self._on_mirror_rows_v_toggled)
+            mirror_v_toggle.grid(row=6, column=0, columnspan=2, sticky="w")
 
-            stagger_adjustment = Gtk.Adjustment(
-                value=self.stagger_percent,
-                lower=0.0,
-                upper=100.0,
-                step_increment=1.0,
-                page_increment=10.0,
-                page_size=0.0,
-            )
-            stagger_scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=stagger_adjustment)
-            stagger_scale.set_digits(0)
-            stagger_scale.connect("value-changed", self._on_stagger_percent_changed)
-            pantograph_grid.attach(Gtk.Label(label=_("Stagger %"), xalign=0), 0, 4, 1, 1)
-            pantograph_grid.attach(stagger_scale, 1, 4, 1, 1)
-            self.stagger_scale = stagger_scale
+            self.flip_h_var = tk.BooleanVar(value=self.flip_horizontal)
+            flip_h_toggle = ttk.Checkbutton(pantograph, text=_("Flip horizontally"), variable=self.flip_h_var, command=self._on_flip_h_toggled)
+            flip_h_toggle.grid(row=7, column=0, columnspan=2, sticky="w")
 
-            mirror_toggle = Gtk.CheckButton(label=_("Mirror every other row horizontally"))
-            mirror_toggle.set_active(self.mirror_alternate_rows)
-            mirror_toggle.connect("toggled", self._on_mirror_rows_toggled)
-            pantograph_grid.attach(mirror_toggle, 0, 5, 2, 1)
-            self.mirror_toggle = mirror_toggle
+            self.flip_v_var = tk.BooleanVar(value=self.flip_vertical)
+            flip_v_toggle = ttk.Checkbutton(pantograph, text=_("Flip vertically"), variable=self.flip_v_var, command=self._on_flip_v_toggled)
+            flip_v_toggle.grid(row=8, column=0, columnspan=2, sticky="w")
 
-            mirror_v_toggle = Gtk.CheckButton(label=_("Mirror every other row vertically"))
-            mirror_v_toggle.set_active(self.mirror_alternate_rows_vertical)
-            mirror_v_toggle.connect("toggled", self._on_mirror_rows_v_toggled)
-            pantograph_grid.attach(mirror_v_toggle, 0, 6, 2, 1)
-            self.mirror_v_toggle = mirror_v_toggle
+            ttk.Label(sidebar, text=_("Export format")).grid(row=10, column=0, sticky="w", pady=(8, 0))
+            export_row = ttk.Frame(sidebar)
+            export_row.grid(row=11, column=0, sticky="ew")
+            export_row.columnconfigure(0, weight=1)
 
-            flip_h_toggle = Gtk.CheckButton(label=_("Flip horizontally"))
-            flip_h_toggle.set_active(self.flip_horizontal)
-            flip_h_toggle.connect("toggled", self._on_flip_h_toggled)
-            pantograph_grid.attach(flip_h_toggle, 0, 7, 2, 1)
-            self.flip_h_toggle = flip_h_toggle
+            self.format_combo = ttk.Combobox(export_row, state="readonly")
+            self.format_combo["values"] = [f"{key} – {profile.title}" for key, profile in self.exporters.items()]
+            if self.format_combo["values"]:
+                self.format_combo.current(0)
+            self.format_combo.grid(row=0, column=0, sticky="ew")
 
-            flip_v_toggle = Gtk.CheckButton(label=_("Flip vertically"))
-            flip_v_toggle.set_active(self.flip_vertical)
-            flip_v_toggle.connect("toggled", self._on_flip_v_toggled)
-            pantograph_grid.attach(flip_v_toggle, 0, 8, 2, 1)
-            self.flip_v_toggle = flip_v_toggle
+            self.export_layout_var = tk.BooleanVar(value=self.export_entire_layout)
+            export_layout_toggle = ttk.Checkbutton(export_row, text=_("Export entire layout"), variable=self.export_layout_var, command=self._on_export_layout_toggled)
+            export_layout_toggle.grid(row=0, column=1, sticky="w", padx=(6, 0))
 
-            export_label = Gtk.Label(label=_("Export format"))
-            export_label.set_xalign(0.0)
-            sidebar.pack_start(export_label, False, False, 0)
+            export_button = ttk.Button(sidebar, text=_("Export…"), command=self._export)
+            export_button.grid(row=12, column=0, sticky="w", pady=(8, 0))
 
-            export_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            sidebar.pack_start(export_row, False, False, 0)
-
-            self.format_combo = Gtk.ComboBoxText()
-            for key, profile in self.exporters.items():
-                self.format_combo.append_text(f"{key} – {profile.title}")
-            self.format_combo.set_active(0)
-            export_row.pack_start(self.format_combo, True, True, 0)
-
-            export_layout_toggle = Gtk.CheckButton(label=_("Export entire layout"))
-            export_layout_toggle.set_active(self.export_entire_layout)
-            export_layout_toggle.set_tooltip_text(_("Include repeats, rows, staggering, and mirroring in the exported file."))
-            export_layout_toggle.connect("toggled", self._on_export_layout_toggled)
-            export_row.pack_start(export_layout_toggle, False, False, 0)
-            self.export_layout_toggle = export_layout_toggle
-
-            export_button = Gtk.Button(label=_("Export…"))
-            export_button.connect("clicked", self._export)
-            sidebar.pack_start(export_button, False, False, 4)
-
-            self.export_status = Gtk.Label()
-            self.export_status.set_xalign(0.0)
-            self.export_status.set_width_chars(50)
-            self.export_status.set_max_width_chars(50)
-            self.export_status.set_line_wrap(False)
-            self.export_status.set_ellipsize(Pango.EllipsizeMode.END)
-            sidebar.pack_start(self.export_status, False, False, 0)
-
-            self.show_all()
+            self.export_status = ttk.Label(sidebar, text="", width=50)
+            self.export_status.grid(row=13, column=0, sticky="w", pady=(2, 0))
 
         def _toggle_play(self, *_args) -> None:
             if (
@@ -1135,26 +1017,25 @@ if GTK_AVAILABLE:
                 and math.isclose(self.progress_mm, self.model.total_length_mm, abs_tol=1e-6)
             ):
                 self.progress_mm = 0.0
-                self.drawing_area.queue_draw()
+                self._schedule_redraw()
             self.playing = not self.playing
-            self.play_button.set_label(_("Pause") if self.playing else _("Play"))
+            self.play_button.config(text=_("Pause") if self.playing else _("Play"))
             self.last_tick = time.monotonic()
 
         def _restart(self, *_args) -> None:
             self.progress_mm = 0.0
             self.playing = False
-            self.play_button.set_label(_("Play"))
+            self.play_button.config(text=_("Play"))
             self.last_tick = time.monotonic()
-            self.drawing_area.queue_draw()
             self._set_progress_slider_value(0.0)
-            self.preview_status.set_text(_("Preview reset. Press Play to start."))
-            self._surface_dirty = True
+            self.preview_status.config(text=_("Preview reset. Press Play to start."))
             if hasattr(self, "_edge_progress"):
                 self._edge_progress = {}
+            self._schedule_redraw()
 
         def _optimize_path(self, *_args) -> None:
             if not self.model.segments:
-                self.preview_status.set_text(_("No path to optimize."))
+                self.preview_status.config(text=_("No path to optimize."))
                 return
             try:
                 optimized_segments = optimize_motion_segments(
@@ -1163,15 +1044,11 @@ if GTK_AVAILABLE:
                     end_point=self.model.end_point,
                 )
             except Exception as exc:  # pragma: no cover - GUI feedback
-                self.preview_status.set_text(_("Optimization failed: ") + str(exc))
+                self.preview_status.config(text=_("Optimization failed: ") + str(exc))
                 return
 
-            if optimized_segments is self.model.segments:
-                self.preview_status.set_text(_("Path is already optimised."))
-                return
-
-            if optimized_segments == self.model.segments:
-                self.preview_status.set_text(_("Path is already optimised."))
+            if optimized_segments is self.model.segments or optimized_segments == self.model.segments:
+                self.preview_status.config(text=_("Path is already optimised."))
                 return
 
             self.model = MotionPathModel(
@@ -1182,92 +1059,74 @@ if GTK_AVAILABLE:
             base_height_px = max(self.model.bounds[3] - self.model.bounds[1], 1e-3)
             self.base_row_distance_mm = base_height_px * self.model.px_to_mm
             self.row_distance_mm = self.base_row_distance_mm
-            if hasattr(self, "row_distance_spin"):
-                adjustment = self.row_distance_spin.get_adjustment()
-                adjustment.set_value(self.row_distance_mm)
+            self.row_distance_var.set(self.row_distance_mm)
             self._refresh_y_warning()
 
             self.progress_mm = 0.0
             self.playing = False
-            self.play_button.set_label(_("Play"))
+            self.play_button.config(text=_("Play"))
             self.last_tick = time.monotonic()
-            self._surface_dirty = True
-            self.drawing_area.queue_draw()
-            self.preview_status.set_text(_("Path optimised to reduce overlaps."))
+            self._schedule_redraw()
+            self.preview_status.config(text=_("Path optimised to reduce overlaps."))
 
-        def _on_speed_changed(self, slider: Gtk.Scale) -> None:
-            self.speed_multiplier = slider.get_value()
-            self.speed_value_label.set_label(f"{self.speed_multiplier:.2f}×")
-        def _on_repeat_changed(self, spin: Gtk.SpinButton) -> None:
-            self.repeat_count = max(1, int(spin.get_value()))
-            self._invalidate_surface()
+        def _on_speed_changed(self, *_args) -> None:
+            self.speed_multiplier = float(self.speed_var.get())
+            self.speed_value_label.config(text=f"{self.speed_multiplier:.2f}×")
 
-        def _on_rows_changed(self, spin: Gtk.SpinButton) -> None:
-            self.row_count = max(1, int(spin.get_value()))
-            self._invalidate_surface()
+        def _on_repeat_changed(self) -> None:
+            self.repeat_count = max(1, int(self.repeat_var.get()))
+            self._schedule_redraw()
 
-        def _on_row_distance_changed(self, spin: Gtk.SpinButton) -> None:
-            self.row_distance_mm = max(1.0, spin.get_value())
-            self._invalidate_surface()
+        def _on_rows_changed(self) -> None:
+            self.row_count = max(1, int(self.rows_var.get()))
+            self._schedule_redraw()
 
-        def _on_stagger_toggled(self, button: Gtk.CheckButton) -> None:
-            self.stagger = button.get_active()
-            self._invalidate_surface()
+        def _on_row_distance_changed(self) -> None:
+            self.row_distance_mm = max(1.0, float(self.row_distance_var.get()))
+            self._schedule_redraw()
 
-        def _on_stagger_percent_changed(self, scale: Gtk.Scale) -> None:
-            self.stagger_percent = scale.get_value()
+        def _on_stagger_toggled(self) -> None:
+            self.stagger = bool(self.stagger_var.get())
+            self._schedule_redraw()
+
+        def _on_stagger_percent_changed(self, *_args) -> None:
+            self.stagger_percent = float(self.stagger_percent_var.get())
             if self.stagger:
-                self._invalidate_surface()
+                self._schedule_redraw()
 
-        def _on_export_layout_toggled(self, button: Gtk.CheckButton) -> None:
-            self.export_entire_layout = button.get_active()
+        def _on_export_layout_toggled(self) -> None:
+            self.export_entire_layout = bool(self.export_layout_var.get())
 
-        def _on_mirror_rows_toggled(self, button: Gtk.CheckButton) -> None:
-            self.mirror_alternate_rows = button.get_active()
-            self._invalidate_surface()
+        def _on_mirror_rows_toggled(self) -> None:
+            self.mirror_alternate_rows = bool(self.mirror_rows_var.get())
+            self._schedule_redraw()
 
-        def _on_mirror_rows_v_toggled(self, button: Gtk.CheckButton) -> None:
-            self.mirror_alternate_rows_vertical = button.get_active()
-            self._invalidate_surface()
+        def _on_mirror_rows_v_toggled(self) -> None:
+            self.mirror_alternate_rows_vertical = bool(self.mirror_rows_v_var.get())
+            self._schedule_redraw()
 
-        def _on_flip_h_toggled(self, button: Gtk.CheckButton) -> None:
-            self.flip_horizontal = button.get_active()
-            self._invalidate_surface()
+        def _on_flip_h_toggled(self) -> None:
+            self.flip_horizontal = bool(self.flip_h_var.get())
+            self._schedule_redraw()
 
-        def _on_flip_v_toggled(self, button: Gtk.CheckButton) -> None:
-            self.flip_vertical = button.get_active()
-            self._invalidate_surface()
+        def _on_flip_v_toggled(self) -> None:
+            self.flip_vertical = bool(self.flip_v_var.get())
+            self._schedule_redraw()
 
         def _export(self, *_args) -> None:
-            active = self.format_combo.get_active()
+            active = self.format_combo.current()
             if active < 0:
                 return
             format_key = list(self.exporters.keys())[active]
             profile = self.exporters[format_key]
 
-            dialog = Gtk.FileChooserDialog(
+            filename = filedialog.asksaveasfilename(
                 title=_("Export Motion Path"),
-                transient_for=self,
-                modal=True,
-                action=Gtk.FileChooserAction.SAVE,
+                initialdir=str(Path.home()),
+                initialfile=f"quilt_path.{profile.extension}",
+                defaultextension=f".{profile.extension}",
+                filetypes=[(profile.title, f"*.{profile.extension}")],
             )
-            dialog.add_buttons(
-                Gtk.STOCK_CANCEL,
-                Gtk.ResponseType.CANCEL,
-                Gtk.STOCK_SAVE,
-                Gtk.ResponseType.OK,
-            )
-            try:
-                dialog.set_current_folder(str(Path.home()))
-            except Exception:
-                pass
-            dialog.set_current_name(f"quilt_path.{profile.extension}")
-            response = dialog.run()
-            filename: Optional[str] = None
-            if response == Gtk.ResponseType.OK:
-                filename = dialog.get_filename()
-            dialog.destroy()
-
             if not filename:
                 return
 
@@ -1278,9 +1137,7 @@ if GTK_AVAILABLE:
             try:
                 out_path.parent.mkdir(parents=True, exist_ok=True)
             except PermissionError:
-                self.export_status.set_text(
-                    _("No permission to create folder: ") + str(out_path.parent)
-                )
+                self.export_status.config(text=_("No permission to create folder: ") + str(out_path.parent))
                 return
             except FileExistsError:
                 pass
@@ -1289,38 +1146,37 @@ if GTK_AVAILABLE:
                 export_model = self._build_export_model() if self.export_entire_layout else self.model
                 profile.writer(export_model, out_path)
             except PermissionError:
-                self.export_status.set_text(
-                    _("Cannot write to {path}. Pick a folder inside your home directory.").format(
+                self.export_status.config(
+                    text=_("Cannot write to {path}. Pick a folder inside your home directory.").format(
                         path=str(out_path)
                     )
                 )
                 return
             except Exception as exc:  # pragma: no cover - GUI feedback
-                self.export_status.set_text(_("Export failed: ") + str(exc))
+                self.export_status.config(text=_("Export failed: ") + str(exc))
                 return
 
-            self.export_status.set_text(_("Exported to ") + str(out_path))
-            self._surface_dirty = True
-        def _invalidate_surface(self) -> None:
-            self._surface_dirty = True
-            self.drawing_area.queue_draw()
+            self.export_status.config(text=_("Exported to ") + str(out_path))
+            self._schedule_redraw()
 
-        def _on_destroy(self, *_args) -> None:
-            if self._timeout_id is not None:
-                GLib.source_remove(self._timeout_id)
-                self._timeout_id = None
-            if self._prime_source is not None:
-                GLib.source_remove(self._prime_source)
-                self._prime_source = None
-            Gtk.main_quit()
+        def _on_destroy(self) -> None:
+            if self._tick_after_id is not None:
+                self.root.after_cancel(self._tick_after_id)
+                self._tick_after_id = None
+            self.root.destroy()
 
-        def _tick(self) -> bool:
+        def _schedule_tick(self) -> None:
+            self._tick_after_id = self.root.after(16, self._tick)
+
+        def _tick(self) -> None:
             if not self.playing or not self.model.edges:
-                return True
+                self._schedule_tick()
+                return
             now = time.monotonic()
             if self.last_tick is None:
                 self.last_tick = now
-                return True
+                self._schedule_tick()
+                return
 
             delta = now - self.last_tick
             self.last_tick = now
@@ -1330,127 +1186,73 @@ if GTK_AVAILABLE:
             if self.progress_mm >= self.model.total_length_mm:
                 self.progress_mm = self.model.total_length_mm
                 self.playing = False
-                self.play_button.set_label(_("Play"))
-            self.drawing_area.queue_draw()
-            return True
+                self.play_button.config(text=_("Play"))
+            self._schedule_redraw()
+            self._schedule_tick()
 
-        def _on_draw(self, widget: Gtk.DrawingArea, cr) -> None:
-            width = widget.get_allocated_width()
-            height = widget.get_allocated_height()
-            self._ensure_static_surface(width, height)
-            if self._static_surface is None:
+        def _on_canvas_resize(self, *_args) -> None:
+            self._schedule_redraw()
+
+        def _schedule_redraw(self) -> None:
+            if self._redraw_pending:
+                return
+            self._redraw_pending = True
+            self.root.after_idle(self._redraw)
+
+        def _redraw(self) -> None:
+            self._redraw_pending = False
+            if not hasattr(self, "canvas"):
+                return
+            width = self.canvas.winfo_width()
+            height = self.canvas.winfo_height()
+            if width <= 1 or height <= 1:
                 return
 
-            cr.set_source_surface(self._static_surface, 0, 0)
-            cr.paint()
+            self.canvas.delete("all")
+            self.canvas.create_rectangle(0, 0, width, height, fill="#f8f8f8", outline="")
 
-            if not self.model.edges or self._viewport is None:
-                self.preview_status.set_text(_("Select at least one path to preview."))
+            if not self.model.edges:
+                self.preview_status.config(text=_("Select at least one path to preview."))
                 return
 
+            self._viewport = self._compute_viewport(width, height)
             scale, offset_x, offset_y = self._viewport
-            cr.translate(offset_x, offset_y)
-            cr.scale(scale, scale)
 
-            transform = lambda p: self._transform_point(p, False, False)
-
-            cr.save()
-            min_x, min_y, max_x, max_y = self._layout_bounds()
-            cr.rectangle(min_x, min_y, max_x - min_x, max_y - min_y)
-            cr.clip()
-
-            self._draw_progress(cr)
+            self._draw_full_pattern(scale, offset_x, offset_y)
+            self._draw_progress(scale, offset_x, offset_y)
 
             if self._y_mismatch and self.model.start_point is not None:
-                cr.save()
-                start_pt = transform(self.model.start_point)
-                cr.translate(start_pt[0], start_pt[1])
-                cr.set_source_rgba(0.8, 0.62, 0.06, 1.0)
-                cr.set_line_width((self._stroke_width() * 10.0) / scale)
-                radius = 9.0 / scale
-                cr.arc(0, 0, radius, 0, math.tau)
-                cr.stroke()
-                cr.restore()
-
+                self._draw_warning_ring(self.model.start_point, scale, offset_x, offset_y)
             if self._y_mismatch and self.model.end_point is not None:
-                cr.save()
-                end_pt = transform(self.model.end_point)
-                cr.translate(end_pt[0], end_pt[1])
-                cr.set_source_rgba(0.8, 0.62, 0.06, 1.0)
-                cr.set_line_width((self._stroke_width() * 10.0) / scale)
-                radius = 9.0 / scale
-                cr.arc(0, 0, radius, 0, math.tau)
-                cr.stroke()
-                cr.restore()
+                self._draw_warning_ring(self.model.end_point, scale, offset_x, offset_y)
 
             point, needle_down = self.model.point_at(self.progress_mm)
-            cr.save()
-            point = transform(point)
-            cr.translate(point[0], point[1])
-            cr.set_source_rgba(0.9, 0.2, 0.2, 1.0 if needle_down else 0.7)
-            radius = 4.0 / scale
-            cr.arc(0, 0, radius, 0, math.tau)
-            cr.fill()
-            cr.restore()
-            cr.restore()
+            px = self._to_canvas(point, scale, offset_x, offset_y)
+            r = max(2.0, 4.0 * scale * 0.2)
+            color = "#e53935" if needle_down else "#f06292"
+            self.canvas.create_oval(px[0] - r, px[1] - r, px[0] + r, px[1] + r, fill=color, outline="")
 
             stitched = min(self.progress_mm, self.model.total_length_mm)
             percent = (stitched / self.model.total_length_mm * 100.0) if self.model.total_length_mm else 0.0
             self._set_progress_slider_value(percent)
-            self.preview_status.set_text(
-                _("Path length: {length:.1f} mm   Previewed: {progress:.1f} mm ({pct:.1f}%)").format(
+            self.preview_status.config(
+                text=_("Path length: {length:.1f} mm   Previewed: {progress:.1f} mm ({pct:.1f}%)").format(
                     length=self.model.total_length_mm, progress=stitched, pct=percent
                 )
             )
 
-        def _ensure_static_surface(self, width: int, height: int) -> None:
-            needs_new = (
-                self._static_surface is None
-                or self._surface_dirty
-                or self._static_surface_size != (width, height)
-            )
-            if not needs_new:
-                return
-
-            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-            ctx = cairo.Context(surface)
-            ctx.set_source_rgb(0.98, 0.98, 0.98)
-            ctx.paint()
-
-            if self.model.edges:
-                viewport = self._compute_viewport(width, height)
-                self._viewport = viewport
-                ctx.translate(viewport[1], viewport[2])
-                ctx.scale(viewport[0], viewport[0])
-                min_x, min_y, max_x, max_y = self._layout_bounds()
-                ctx.save()
-                ctx.rectangle(min_x, min_y, max_x - min_x, max_y - min_y)
-                ctx.clip()
-                self._draw_full_pattern(ctx)
-                ctx.restore()
-            else:
-                self._viewport = (1.0, 0.0, 0.0)
-
-            self._static_surface = surface
-            self._static_surface_size = (width, height)
-            self._surface_dirty = False
-
         def _set_progress_slider_value(self, percent: float) -> None:
-            if not hasattr(self, "progress_slider"):
-                return
             self._updating_progress_slider = True
-            self.progress_slider.set_value(max(0.0, min(100.0, percent)))
+            self.progress_var.set(max(0.0, min(100.0, percent)))
             self._updating_progress_slider = False
 
-        def _on_progress_slider_changed(self, slider: Gtk.Scale) -> None:
+        def _on_progress_slider_changed(self, _value) -> None:
             if self._updating_progress_slider or not self.model.total_length_mm:
                 return
-            percent = slider.get_value()
-            self.progress_mm = (
-                percent / 100.0 * self.model.total_length_mm
-            )
+            percent = float(self.progress_var.get())
+            self.progress_mm = percent / 100.0 * self.model.total_length_mm
             self.last_tick = time.monotonic()
-            self.drawing_area.queue_draw()
+            self._schedule_redraw()
 
         def _pantograph_offsets(self) -> List[Tuple[int, float, float]]:
             width_px = max(self.model.bounds[2] - self.model.bounds[0], 1e-3)
@@ -1471,7 +1273,6 @@ if GTK_AVAILABLE:
             )
 
         def _transform_point(self, point: Point, mirror_row_h: bool, mirror_row_v: bool) -> Point:
-            """Apply flip/mirror transforms around the pattern centre."""
             min_x, min_y, max_x, max_y = self.model.bounds
             cx = (min_x + max_x) / 2.0
             cy = (min_y + max_y) / 2.0
@@ -1513,7 +1314,6 @@ if GTK_AVAILABLE:
             """Return a MotionPathModel representing the full layout."""
             layout_bounds = self._layout_bounds()
             raw_offsets = self._pantograph_offsets()
-            # Switchback ordering: alternate direction every row.
             offsets_by_row: Dict[int, List[Tuple[float, float]]] = {}
             for row_idx, dx, dy in raw_offsets:
                 offsets_by_row.setdefault(row_idx, []).append((dx, dy))
@@ -1554,7 +1354,12 @@ if GTK_AVAILABLE:
                             u2 = t
                     return True
 
-                if not (_update(-dx, p0[0] - min_x) and _update(dx, max_x - p0[0]) and _update(-dy, p0[1] - min_y) and _update(dy, max_y - p0[1])):
+                if not (
+                    _update(-dx, p0[0] - min_x)
+                    and _update(dx, max_x - p0[0])
+                    and _update(-dy, p0[1] - min_y)
+                    and _update(dy, max_y - p0[1])
+                ):
                     return None
                 clipped_start = (p0[0] + u1 * dx, p0[1] + u1 * dy)
                 clipped_end = (p0[0] + u2 * dx, p0[1] + u2 * dy)
@@ -1576,7 +1381,6 @@ if GTK_AVAILABLE:
                 return clipped
 
             for row_idx, dx, dy in offsets:
-                # Switchback export: odd rows traverse right-to-left and are mirrored horizontally.
                 mirror_row_h = (row_idx % 2 == 1) or (self.mirror_alternate_rows and (row_idx % 2 == 1))
                 mirror_row_v = self.mirror_alternate_rows_vertical and (row_idx % 2 == 1)
                 for seg in self.model.segments:
@@ -1590,7 +1394,6 @@ if GTK_AVAILABLE:
                     if len(pts) < 2:
                         continue
                     if last_end is not None and not _close_enough(last_end, pts[0]):
-                        # Switchback export keeps stitching between rows; connect with needle down.
                         stitched_segments.append(MotionSegment(points=[last_end, pts[0]], needle_down=True))
                     stitched_segments.append(MotionSegment(points=pts, needle_down=seg.needle_down))
                     last_end = pts[-1]
@@ -1611,24 +1414,8 @@ if GTK_AVAILABLE:
             )
             if span <= 0:
                 return 1.0
-            width = (span / 300.0) ** 0.7  # slightly heavier scaling for large layouts
+            width = (span / 300.0) ** 0.7
             return max(min(width, 10.0), 0.08)
-
-        def _on_size_allocate(self, widget, allocation) -> None:
-            if self._static_surface_size != (allocation.width, allocation.height):
-                self._surface_dirty = True
-
-        def _prime_surface(self) -> bool:
-            if not self.drawing_area.get_realized():
-                return True
-            width = self.drawing_area.get_allocated_width()
-            height = self.drawing_area.get_allocated_height()
-            if width <= 0 or height <= 0:
-                return True
-            self._ensure_static_surface(width, height)
-            self.drawing_area.queue_draw()
-            self._prime_source = None
-            return False
 
         def _compute_viewport(self, width: int, height: int) -> Tuple[float, float, float]:
             min_x, min_y, max_x, max_y = self._layout_bounds()
@@ -1642,48 +1429,38 @@ if GTK_AVAILABLE:
             offset_y = (height - span_y * scale) / 2.0 - min_y * scale
             return scale, offset_x, offset_y
 
-        def _draw_full_pattern(self, cr) -> None:
-            cr.save()
-            cr.set_line_width(self._stroke_width())
+        def _to_canvas(self, point: Point, scale: float, offset_x: float, offset_y: float) -> Point:
+            return (point[0] * scale + offset_x, point[1] * scale + offset_y)
+
+        def _draw_full_pattern(self, scale: float, offset_x: float, offset_y: float) -> None:
+            line_width = max(1.0, self._stroke_width() * scale)
             offsets = self._pantograph_offsets()
 
-            min_x, min_y, max_x, max_y = self._layout_bounds()
-            cr.save()
-            cr.rectangle(min_x, min_y, max_x - min_x, max_y - min_y)
-            cr.clip()
-
             for row_idx, dx, dy in offsets:
-                cr.save()
-                cr.translate(dx, dy)
+                mirror_row_h = self.mirror_alternate_rows and (row_idx % 2 == 1)
+                mirror_row_v = self.mirror_alternate_rows_vertical and (row_idx % 2 == 1)
                 for seg in self.model.segments:
-                    color = (0.2, 0.4, 0.7, 0.7) if seg.needle_down else (0.85, 0.2, 0.2, 0.8)
-                    cr.set_source_rgba(*color)
-                    cr.new_path()
-                    mirror_row_h = self.mirror_alternate_rows and (row_idx % 2 == 1)
-                    mirror_row_v = self.mirror_alternate_rows_vertical and (row_idx % 2 == 1)
+                    color = "#2b6cb0" if seg.needle_down else "#d14343"
                     pts = [self._transform_point(pt, mirror_row_h, mirror_row_v) for pt in seg.points]
-                    cr.move_to(*pts[0])
-                    for pt in pts[1:]:
-                        cr.line_to(*pt)
-                    cr.stroke()
-                cr.restore()
-            cr.restore()
-            cr.restore()
+                    pts = [(p[0] + dx, p[1] + dy) for p in pts]
+                    if len(pts) < 2:
+                        continue
+                    coords = []
+                    for pt in pts:
+                        cx, cy = self._to_canvas(pt, scale, offset_x, offset_y)
+                        coords.extend([cx, cy])
+                    self.canvas.create_line(*coords, fill=color, width=line_width)
 
-        def _draw_progress(self, cr) -> None:
-            cr.save()
-            cr.set_line_width(self._stroke_width() * 1.8)
+        def _rgba_to_hex(self, rgba: Tuple[float, float, float, float]) -> str:
+            r, g, b, _a = rgba
+            return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+        def _draw_progress(self, scale: float, offset_x: float, offset_y: float) -> None:
+            line_width = max(1.0, self._stroke_width() * 1.8 * scale)
             remaining = self.progress_mm
             transform = lambda p: self._transform_point(p, False, False)
 
-            def _edge_key(a: Point, b: Point) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-                p0 = (round(a[0], 6), round(a[1], 6))
-                p1 = (round(b[0], 6), round(b[1], 6))
-                return (p0, p1) if p0 <= p1 else (p1, p0)
-
-            # Spatial coverage grid for previously completed edges (or drawn portions).
-            # Coverage is applied only after an edge finishes to avoid self-triggered retrace coloring.
-            cell_size = self._stroke_width() * 0.01
+            cell_size = max(self._stroke_width() * 0.01, 1e-6)
             coverage: Dict[Tuple[int, int], int] = {}
 
             def _sample_cells(p0: Point, p1: Point) -> List[Tuple[int, int]]:
@@ -1711,7 +1488,6 @@ if GTK_AVAILABLE:
                 if length_remaining <= 0:
                     return True
 
-                # Subdivide the edge into up to 12 chunks (more responsive color for longer edges).
                 chunks = max(1, min(12, int(math.ceil(edge.length_mm / max(edge.length_mm / 5.0, 1e-6)))))
                 chunk_len = edge.length_mm / chunks if chunks else edge.length_mm
 
@@ -1739,7 +1515,6 @@ if GTK_AVAILABLE:
                     draw_end = transform(seg_end)
 
                     cells = _sample_cells(draw_start, draw_end)
-                    # Overlap detection: require a modest fraction of samples already covered to count as a retrace.
                     if cells:
                         overlap_hits = [coverage.get(c, 0) for c in cells]
                         covered = [v for v in overlap_hits if v > 0]
@@ -1750,15 +1525,14 @@ if GTK_AVAILABLE:
                             passes_completed = 0
                     else:
                         passes_completed = 0
-                    cr.set_source_rgba(*_color_for_pass(passes_completed, edge.needle_down))
 
-                    cr.move_to(*draw_start)
-                    cr.line_to(*draw_end)
-                    cr.stroke()
+                    color = self._rgba_to_hex(_color_for_pass(passes_completed, edge.needle_down))
+                    start_px = self._to_canvas(draw_start, scale, offset_x, offset_y)
+                    end_px = self._to_canvas(draw_end, scale, offset_x, offset_y)
+                    self.canvas.create_line(*start_px, *end_px, fill=color, width=line_width)
 
                     edge_cells.extend(cells)
 
-                    # If we haven't finished this edge, stop drawing further edges.
                     if seg_draw_mm + seg_start_mm + 1e-9 < length_remaining:
                         continue
                     if length_remaining + 1e-9 < edge.length_mm:
@@ -1775,7 +1549,17 @@ if GTK_AVAILABLE:
                 if not _subdivide_and_draw(edge):
                     break
 
-            cr.restore()
+        def _draw_warning_ring(self, point: Point, scale: float, offset_x: float, offset_y: float) -> None:
+            px = self._to_canvas(point, scale, offset_x, offset_y)
+            r = max(6.0, 9.0 * scale * 0.2)
+            self.canvas.create_oval(
+                px[0] - r,
+                px[1] - r,
+                px[0] + r,
+                px[1] + r,
+                outline="#b8860b",
+                width=max(1.0, 2.0 * scale * 0.5),
+            )
 
         def _refresh_y_warning(self) -> None:
             start = self.model.start_point
@@ -1787,17 +1571,15 @@ if GTK_AVAILABLE:
                 mismatch = delta_mm > 0.1 + 1e-9
             self._y_mismatch = mismatch
             if mismatch:
-                message = _("WARNING: Start node and end node have different Y-axis positions (dY = {delta:.3f} mm > 0.1mm)").format(
-                    delta=delta_mm
-                )
-                self.y_warning_label.set_markup(f'<span foreground="#b8860b">{message}</span>')
+                message = _(
+                    "WARNING: Start node and end node have different Y-axis positions (dY = {delta:.3f} mm > 0.1mm)"
+                ).format(delta=delta_mm)
+                self.y_warning_label.config(text=message)
             else:
-                self.y_warning_label.set_markup("")
+                self.y_warning_label.config(text="")
 else:
-    class QuiltPreviewWindow:  # pragma: no cover - placeholder when GTK missing
+    class QuiltPreviewWindow:  # pragma: no cover - placeholder when Tk missing
         pass
-
-
 
 
 # Export writers -------------------------------------------------------------
@@ -2029,15 +1811,10 @@ class QuiltMotionExportExtension(inkex.EffectExtension):
     """Entry point for Inkscape."""
 
     def effect(self) -> None:  # pragma: no cover - Inkscape runtime
-        if not GTK_AVAILABLE:
-            detail = (
-                _(
-                    "PyGObject (Gtk 3) is required for the preview UI. "
-                    "Install the packages python3-gi, python3-gi-cairo, python3-cairo, and gir1.2-gtk-3.0."
-                )
-            )
-            if GTK_LOAD_ERROR:
-                detail = f"{detail}\n{GTK_LOAD_ERROR}"
+        if not TK_AVAILABLE:
+            detail = _("Tkinter is required for the preview UI.")
+            if TK_LOAD_ERROR:
+                detail = f"{detail}\n{TK_LOAD_ERROR}"
             raise inkex.AbortExtension(detail)
 
         selection = self.svg.selection.filter(PathElement)
@@ -2082,7 +1859,6 @@ class QuiltMotionExportExtension(inkex.EffectExtension):
         model = MotionPathModel(ordered_segments, px_to_mm=px_to_mm, doc_height_px=doc_height_px)
         window = QuiltPreviewWindow(model, EXPORT_PROFILES)
         window.present()
-        Gtk.main()
 
 
 if __name__ == "__main__":  # pragma: no cover
