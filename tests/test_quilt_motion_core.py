@@ -94,3 +94,17 @@ class OptimizePathEdgeTests(unittest.TestCase):
         optimized = qmc.optimize_motion_segments(segments, start_point=(0.0, 0.0), end_point=(10.0, 0.0))
         self.assertEqual(len(optimized), 2)
         self.assertFalse(optimized[1].needle_down)
+
+    def test_optimize_reduces_stitched_length(self) -> None:
+        points = [(0.0, 0.0), (10.0, 0.0), (0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]
+        segments = [qmc.MotionSegment(points=points, needle_down=True)]
+        optimized = qmc.optimize_motion_segments(segments, start_point=points[0], end_point=points[-1])
+        original_len = sum(
+            ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+            for a, b in zip(segments[0].points, segments[0].points[1:])
+        )
+        optimized_len = sum(
+            ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+            for a, b in zip(optimized[0].points, optimized[0].points[1:])
+        )
+        self.assertLess(optimized_len, original_len)

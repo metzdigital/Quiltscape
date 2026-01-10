@@ -645,6 +645,8 @@ class PreviewWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self._tick)
         self.timer.start(16)
 
+        self._last_optimized_delta: Optional[float] = None
+
     def _separator(self) -> QtWidgets.QFrame:
         sep = QtWidgets.QFrame()
         sep.setFrameShape(QtWidgets.QFrame.HLine)
@@ -692,8 +694,21 @@ class PreviewWindow(QtWidgets.QMainWindow):
             return
 
         if optimized_segments is self.controller.model.segments or optimized_segments == self.controller.model.segments:
-            self.preview_status.setText("Path is already optimised.")
+            self.preview_status.setText("Path is already optimised or cannot be reduced.")
             return
+
+        def _stitched_length(segment_list):
+            total = 0.0
+            for seg in segment_list:
+                if not seg.needle_down or len(seg.points) < 2:
+                    continue
+                for a, b in zip(seg.points, seg.points[1:]):
+                    total += ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+            return total
+
+        original_len = _stitched_length(self.controller.model.segments)
+        optimized_len = _stitched_length(optimized_segments)
+        self._last_optimized_delta = original_len - optimized_len
 
         self.controller.model = qmc.MotionPathModel(
             optimized_segments,
@@ -711,7 +726,12 @@ class PreviewWindow(QtWidgets.QMainWindow):
         self.controller.playing = False
         self.play_button.setText("Play")
         self.controller.last_tick = time.monotonic()
-        self.preview_status.setText("Path optimised to reduce overlaps.")
+        if self._last_optimized_delta is not None:
+            self.preview_status.setText(
+                f"Path optimised. Reduced stitched length by {self._last_optimized_delta:.1f} mm."
+            )
+        else:
+            self.preview_status.setText("Path optimised.")
         self.canvas.update()
 
     def _on_speed_changed(self, value: int) -> None:
