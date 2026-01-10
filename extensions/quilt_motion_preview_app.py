@@ -635,6 +635,12 @@ class PreviewWindow(QtWidgets.QMainWindow):
             on_y_warning=self.warning_label.setText,
         )
 
+        if "GIF" not in self.controller.exporters:
+            message = "GIF export unavailable (Pillow not installed)."
+            if qmc.PIL_LOAD_ERROR:
+                message = f"{message} {qmc.PIL_LOAD_ERROR}"
+            self.export_status.setText(message)
+
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(16)

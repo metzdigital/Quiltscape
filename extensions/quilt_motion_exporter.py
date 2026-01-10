@@ -1074,6 +1074,11 @@ def _preview_payload(
 
 
 def _find_preview_python() -> str:
+    config_path = _EXTENSION_DIR / "quilt_motion_preview_python.txt"
+    if config_path.exists():
+        configured = config_path.read_text(encoding="utf-8").strip()
+        if configured:
+            return configured
     override = os.environ.get("QUILT_PREVIEW_PYTHON")
     if override:
         return override

@@ -23,6 +23,7 @@ EXTENSION_FILES = (
     ROOT_DIR / "extensions" / "quilt_motion_preview_app.py",
     ROOT_DIR / "extensions" / "quilt_motion_core.py",
 )
+PREVIEW_PYTHON_FILE = "quilt_motion_preview_python.txt"
 REQUIREMENTS_FILE = ROOT_DIR / "requirements.txt"
 
 
@@ -72,6 +73,14 @@ def install_extension(dest_dir: Path, dry_run: bool) -> None:
         else:
             shutil.copy2(src, dest)
             print(f"Copied {src.name} -> {dest}")
+
+
+def write_preview_python(dest_dir: Path, python_exe: str, dry_run: bool) -> None:
+    target = dest_dir / PREVIEW_PYTHON_FILE
+    if dry_run:
+        print(f"[dry-run] Would write preview python to {target}")
+        return
+    target.write_text(python_exe + "\n", encoding="utf-8")
 
 
 def run_pip_install(python_exe: str, libs_dir: Path, dry_run: bool) -> None:
@@ -174,6 +183,7 @@ def main() -> int:
     print(f"Installing deps into: {libs_dir}")
 
     install_extension(args.dest, args.dry_run)
+    write_preview_python(args.dest, python_exe, args.dry_run)
     if not args.skip_pip:
         run_pip_install(python_exe, libs_dir, args.dry_run)
     if not args.dry_run:
