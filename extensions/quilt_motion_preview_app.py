@@ -68,10 +68,10 @@ class PreviewController(QtCore.QObject):
         self.repeat_count = 2
         self.row_count = 2
         base_height_px = max(model.bounds[3] - model.bounds[1], 1e-3)
-        self.base_row_distance_mm = base_height_px * model.px_to_mm
+        self.base_row_distance_mm = base_height_px * model.px_to_mm * 0.1
         self.row_distance_mm = self.base_row_distance_mm
-        self.stagger = False
-        self.stagger_percent = 50.0
+        self.stagger = True
+        self.stagger_percent = 0.0
         self._y_mismatch = False
         self.flip_horizontal = False
         self.flip_vertical = False

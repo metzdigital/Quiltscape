@@ -1041,7 +1041,7 @@ EXPORT_PROFILES: Dict[str, ExportProfile] = {
         description="Light‑weight polyline DXF",
         writer=_write_dxf,
     ),
-    "QCT": ExportProfile(
+    "DXF": ExportProfile(
         title="QCT DXF (lines)",
         extension="dxf",
         description="QCT-compatible line DXF",
