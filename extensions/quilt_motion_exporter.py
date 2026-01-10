@@ -288,12 +288,11 @@ def _flatten_path_element(
         points = [tuple(node[1]) for node in subpath]
         if len(points) < 2:
             continue
-        # Remove duplicate closing node
-        if math.isclose(points[0][0], points[-1][0], abs_tol=1e-9) and math.isclose(
-            points[0][1], points[-1][1], abs_tol=1e-9
+        if (
+            len(points) < 3
+            and math.isclose(points[0][0], points[-1][0], abs_tol=1e-9)
+            and math.isclose(points[0][1], points[-1][1], abs_tol=1e-9)
         ):
-            points = points[:-1]
-        if not points:
             continue
         if previous_end and (
             not math.isclose(previous_end[0], points[0][0], abs_tol=1e-6)
