@@ -8,17 +8,17 @@ EXT_DIR = ROOT / "extensions"
 if str(EXT_DIR) not in sys.path:
     sys.path.insert(0, str(EXT_DIR))
 
-import quilt_motion_exporter as qme  # noqa: E402
+import quilt_motion_core as qmc  # noqa: E402
 
 
 class MotionPathModelTests(unittest.TestCase):
     def setUp(self) -> None:
         px_to_mm = 0.2645833333  # 96 dpi conversion
         self.px_to_mm = px_to_mm
-        self.model = qme.MotionPathModel(
+        self.model = qmc.MotionPathModel(
             [
-                qme.MotionSegment(points=[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)], needle_down=True),
-                qme.MotionSegment(points=[(10.0, 10.0), (0.0, 10.0)], needle_down=False),
+                qmc.MotionSegment(points=[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)], needle_down=True),
+                qmc.MotionSegment(points=[(10.0, 10.0), (0.0, 10.0)], needle_down=False),
             ],
             px_to_mm=px_to_mm,
         )
@@ -48,15 +48,15 @@ class ExportWriterTests(unittest.TestCase):
     def setUp(self) -> None:
         px_to_mm = 0.2645833333
         segments = [
-            qme.MotionSegment(points=[(0.0, 0.0), (5.0, 0.0)], needle_down=True),
-            qme.MotionSegment(points=[(5.0, 0.0), (5.0, 5.0)], needle_down=False),
+            qmc.MotionSegment(points=[(0.0, 0.0), (5.0, 0.0)], needle_down=True),
+            qmc.MotionSegment(points=[(5.0, 0.0), (5.0, 5.0)], needle_down=False),
         ]
-        self.model = qme.MotionPathModel(segments, px_to_mm=px_to_mm)
+        self.model = qmc.MotionPathModel(segments, px_to_mm=px_to_mm)
 
     def test_dxf_writer_emits_polyline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "path.dxf"
-            qme._write_dxf(self.model, out)
+            qmc._write_dxf(self.model, out)
             data = out.read_text()
             self.assertIn("LWPOLYLINE", data)
             self.assertIn("STITCH", data)
@@ -64,18 +64,18 @@ class ExportWriterTests(unittest.TestCase):
     def test_qct_writer_emits_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "path.dxf"
-            qme._write_qct_dxf(self.model, out)
+            qmc._write_qct_dxf(self.model, out)
             data = out.read_text()
             self.assertIn("LINE", data)
             self.assertIn("Layer", data)
             self.assertIn("ENTITIES", data)
 
     def test_gif_writer_generates_animation(self) -> None:
-        if not qme.PIL_AVAILABLE:
+        if not qmc.PIL_AVAILABLE:
             self.skipTest("Pillow not available")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "path.gif"
-            qme._write_gif(self.model, out)
+            qmc._write_gif(self.model, out)
             data = out.read_bytes()
             self.assertTrue(data.startswith(b"GIF"))
             self.assertGreater(len(data), 100)
@@ -84,17 +84,17 @@ class ExportWriterTests(unittest.TestCase):
 class ExportProfilesTests(unittest.TestCase):
     def test_all_required_formats_registered(self) -> None:
         required = {"DXF", "QCT"}
-        if qme.PIL_AVAILABLE:
+        if qmc.PIL_AVAILABLE:
             required.add("GIF")
-        self.assertTrue(required.issubset(set(qme.EXPORT_PROFILES.keys())))
+        self.assertTrue(required.issubset(set(qmc.EXPORT_PROFILES.keys())))
 
 
 class DisplayColorTests(unittest.TestCase):
     def test_color_for_pass_transitions(self) -> None:
-        blue = qme._color_for_pass(0, needle_down=True)
-        yellow = qme._color_for_pass(1, needle_down=True)
-        red = qme._color_for_pass(2, needle_down=True)
-        travel_red = qme._color_for_pass(0, needle_down=False)
+        blue = qmc._color_for_pass(0, needle_down=True)
+        yellow = qmc._color_for_pass(1, needle_down=True)
+        red = qmc._color_for_pass(2, needle_down=True)
+        travel_red = qmc._color_for_pass(0, needle_down=False)
 
         self.assertEqual(blue, (0.1, 0.55, 0.85, 0.9))
         self.assertEqual(yellow, (0.95, 0.85, 0.25, 0.9))
@@ -115,7 +115,7 @@ class DisplayColorTests(unittest.TestCase):
 class PantographLayoutTests(unittest.TestCase):
     def test_stagger_extends_left_and_right(self) -> None:
         bounds = (0.0, 0.0, 10.0, 5.0)
-        offsets = qme._compute_pantograph_offsets(
+        offsets = qmc._compute_pantograph_offsets(
             bounds=bounds,
             repeat_count=2,
             row_count=1,
@@ -132,7 +132,7 @@ class PantographLayoutTests(unittest.TestCase):
 
     def test_layout_bounds_ignore_stagger(self) -> None:
         bounds = (0.0, 0.0, 10.0, 5.0)
-        layout = qme._compute_layout_bounds(
+        layout = qmc._compute_layout_bounds(
             bounds=bounds,
             repeat_count=2,
             row_count=2,
@@ -155,8 +155,8 @@ class OptimizePathTests(unittest.TestCase):
             (0.0, 0.0),
             (10.0, 0.0),
         ]
-        segments = [qme.MotionSegment(points=original_points, needle_down=True)]
-        optimized_segments = qme.optimize_motion_segments(
+        segments = [qmc.MotionSegment(points=original_points, needle_down=True)]
+        optimized_segments = qmc.optimize_motion_segments(
             segments,
             start_point=original_points[0],
             end_point=original_points[-1],

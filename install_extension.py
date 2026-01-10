@@ -20,6 +20,8 @@ ROOT_DIR = Path(__file__).resolve().parent
 EXTENSION_FILES = (
     ROOT_DIR / "extensions" / "quilt_motion_exporter.py",
     ROOT_DIR / "extensions" / "quilt_motion_exporter.inx",
+    ROOT_DIR / "extensions" / "quilt_motion_preview_app.py",
+    ROOT_DIR / "extensions" / "quilt_motion_core.py",
 )
 REQUIREMENTS_FILE = ROOT_DIR / "requirements.txt"
 
@@ -105,17 +107,19 @@ def run_pip_install(python_exe: str, libs_dir: Path, dry_run: bool) -> None:
         return
 
 
-def check_optional_deps() -> None:
+def check_optional_deps(libs_dir: Path) -> None:
     missing = []
+    if libs_dir.exists():
+        sys.path.insert(0, str(libs_dir))
     try:
         import PIL  # noqa: F401
     except Exception:
         missing.append("Pillow")
 
     try:
-        import tkinter  # noqa: F401
+        import PySide6  # noqa: F401
     except Exception:
-        missing.append("Tkinter (python3-tk)")
+        missing.append("PySide6")
 
     if missing:
         print("Missing optional runtime dependencies:")
@@ -173,7 +177,7 @@ def main() -> int:
     if not args.skip_pip:
         run_pip_install(python_exe, libs_dir, args.dry_run)
     if not args.dry_run:
-        check_optional_deps()
+        check_optional_deps(libs_dir)
     print("Done. Restart Inkscape to load the extension.")
     return 0
 

@@ -3,15 +3,21 @@
 Inkscape Quilt Motion Preview & Export extension.
 
 This script gathers the selected path elements from the active document,
-preserves their draw order, animates them in a GTK preview window, and
+preserves their draw order, launches a standalone preview application, and
 exports the resulting stitch path to several long‑arm quilting formats.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import time
 import heapq
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
 import warnings
 import sys
 from dataclasses import dataclass
@@ -45,16 +51,6 @@ warnings.filterwarnings(
     message="DynamicImporter\\.exec_module\\(\\) not found; falling back to load_module\\(\\)",
     category=ImportWarning,
 )
-
-try:
-    import tkinter as tk
-    from tkinter import filedialog, ttk
-
-    TK_AVAILABLE = True
-    TK_LOAD_ERROR: Optional[str] = None
-except Exception as exc:  # pragma: no cover - Tk is standard but may be missing
-    TK_AVAILABLE = False
-    TK_LOAD_ERROR = str(exc)
 
 
 Point = Tuple[float, float]
@@ -837,751 +833,6 @@ def optimize_motion_segments(
     return optimized_segments
 
 
-if TK_AVAILABLE:
-    class QuiltPreviewWindow:
-        """Interactive Tk window that previews and exports the motion path."""
-
-        BASE_SPEED_MM_PER_SEC = 35.0
-
-        def __init__(
-            self,
-            model: MotionPathModel,
-            exporters: Dict[str, ExportProfile],
-        ) -> None:
-            self.model = model
-            self.exporters = exporters
-
-            self.progress_mm = 0.0
-            self.speed_multiplier = 1.0
-            self.playing = True
-            self.last_tick: Optional[float] = None
-            self._tick_after_id: Optional[str] = None
-            self._viewport: Optional[Tuple[float, float, float]] = None
-            self._updating_progress_slider = False
-            self._redraw_pending = False
-
-            # Pantograph defaults
-            self.repeat_count = 2
-            self.row_count = 2
-            base_height_px = max(model.bounds[3] - model.bounds[1], 1e-3)
-            self.base_row_distance_mm = base_height_px * model.px_to_mm
-            self.row_distance_mm = self.base_row_distance_mm
-            self.stagger = False
-            self.stagger_percent = 50.0
-            self._y_mismatch = False
-            self.flip_horizontal = False
-            self.flip_vertical = False
-            self.mirror_alternate_rows = False
-            self.mirror_alternate_rows_vertical = False
-            self.export_entire_layout = False
-
-            self.root = tk.Tk()
-            self.root.title(_("Quilt Motion Preview"))
-            self.root.geometry("1100x600")
-            self.root.protocol("WM_DELETE_WINDOW", self._on_destroy)
-
-            self._build_ui()
-            self._refresh_y_warning()
-            self._schedule_tick()
-            self._schedule_redraw()
-
-        def present(self) -> None:
-            self.root.mainloop()
-
-        def _build_ui(self) -> None:
-            self.root.columnconfigure(0, weight=1)
-            self.root.rowconfigure(0, weight=1)
-
-            main = ttk.Frame(self.root, padding=12)
-            main.grid(row=0, column=0, sticky="nsew")
-            main.columnconfigure(0, weight=1)
-            main.rowconfigure(0, weight=1)
-
-            left_column = ttk.Frame(main)
-            left_column.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-            left_column.columnconfigure(0, weight=1)
-            left_column.rowconfigure(0, weight=1)
-
-            self.canvas = tk.Canvas(left_column, background="#f8f8f8", highlightthickness=1)
-            self.canvas.grid(row=0, column=0, sticky="nsew")
-            self.canvas.bind("<Configure>", self._on_canvas_resize)
-
-            self.y_warning_label = ttk.Label(left_column, foreground="#b8860b")
-            self.y_warning_label.grid(row=1, column=0, sticky="w", pady=(6, 0))
-
-            sidebar = ttk.Frame(main, width=280)
-            sidebar.grid(row=0, column=1, sticky="ns")
-            sidebar.columnconfigure(0, weight=1)
-
-            controls = ttk.Frame(sidebar)
-            controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-            controls.columnconfigure((0, 1, 2), weight=1)
-
-            self.play_button = ttk.Button(controls, text=_("Pause"), command=self._toggle_play)
-            self.play_button.grid(row=0, column=0, sticky="ew")
-
-            restart_button = ttk.Button(controls, text=_("Restart"), command=self._restart)
-            restart_button.grid(row=0, column=1, sticky="ew", padx=4)
-
-            self.optimize_button = ttk.Button(controls, text=_("Optimize path"), command=self._optimize_path)
-            self.optimize_button.grid(row=0, column=2, sticky="ew")
-
-            ttk.Label(sidebar, text=_("Preview speed")).grid(row=1, column=0, sticky="w")
-            self.speed_var = tk.DoubleVar(value=1.0)
-            self.speed_slider = ttk.Scale(sidebar, from_=0.1, to=5.0, orient="horizontal", variable=self.speed_var, command=self._on_speed_changed)
-            self.speed_slider.grid(row=2, column=0, sticky="ew")
-            self.speed_value_label = ttk.Label(sidebar, text=_("1.00×"))
-            self.speed_value_label.grid(row=3, column=0, sticky="w", pady=(0, 6))
-
-            ttk.Label(sidebar, text=_("Preview progress")).grid(row=4, column=0, sticky="w")
-            self.progress_var = tk.DoubleVar(value=0.0)
-            self.progress_slider = ttk.Scale(sidebar, from_=0.0, to=100.0, orient="horizontal", variable=self.progress_var, command=self._on_progress_slider_changed)
-            self.progress_slider.grid(row=5, column=0, sticky="ew")
-
-            self.preview_status = ttk.Label(sidebar, text="", width=50)
-            self.preview_status.grid(row=6, column=0, sticky="w", pady=(0, 8))
-
-            ttk.Separator(sidebar, orient="horizontal").grid(row=7, column=0, sticky="ew", pady=6)
-
-            ttk.Label(sidebar, text=_("Pantograph layout")).grid(row=8, column=0, sticky="w")
-            pantograph = ttk.Frame(sidebar)
-            pantograph.grid(row=9, column=0, sticky="ew")
-            pantograph.columnconfigure(1, weight=1)
-
-            self.repeat_var = tk.IntVar(value=self.repeat_count)
-            ttk.Label(pantograph, text=_("Repeats")).grid(row=0, column=0, sticky="w")
-            repeat_spin = ttk.Spinbox(pantograph, from_=1, to=20, textvariable=self.repeat_var, width=5, command=self._on_repeat_changed)
-            repeat_spin.grid(row=0, column=1, sticky="w")
-
-            self.rows_var = tk.IntVar(value=self.row_count)
-            ttk.Label(pantograph, text=_("Rows")).grid(row=1, column=0, sticky="w")
-            rows_spin = ttk.Spinbox(pantograph, from_=1, to=20, textvariable=self.rows_var, width=5, command=self._on_rows_changed)
-            rows_spin.grid(row=1, column=1, sticky="w")
-
-            self.row_distance_var = tk.DoubleVar(value=self.row_distance_mm)
-            ttk.Label(pantograph, text=_("Row distance (mm)")).grid(row=2, column=0, sticky="w")
-            row_distance_spin = ttk.Spinbox(pantograph, from_=1.0, to=5000.0, increment=1.0, textvariable=self.row_distance_var, width=7, command=self._on_row_distance_changed)
-            row_distance_spin.grid(row=2, column=1, sticky="w")
-            self.row_distance_spin = row_distance_spin
-
-            self.stagger_var = tk.BooleanVar(value=self.stagger)
-            stagger_toggle = ttk.Checkbutton(pantograph, text=_("Stagger alternate rows"), variable=self.stagger_var, command=self._on_stagger_toggled)
-            stagger_toggle.grid(row=3, column=0, columnspan=2, sticky="w")
-
-            self.stagger_percent_var = tk.DoubleVar(value=self.stagger_percent)
-            ttk.Label(pantograph, text=_("Stagger %")).grid(row=4, column=0, sticky="w")
-            self.stagger_scale = ttk.Scale(pantograph, from_=0.0, to=100.0, orient="horizontal", variable=self.stagger_percent_var, command=self._on_stagger_percent_changed)
-            self.stagger_scale.grid(row=4, column=1, sticky="ew")
-
-            self.mirror_rows_var = tk.BooleanVar(value=self.mirror_alternate_rows)
-            mirror_toggle = ttk.Checkbutton(pantograph, text=_("Mirror every other row horizontally"), variable=self.mirror_rows_var, command=self._on_mirror_rows_toggled)
-            mirror_toggle.grid(row=5, column=0, columnspan=2, sticky="w")
-
-            self.mirror_rows_v_var = tk.BooleanVar(value=self.mirror_alternate_rows_vertical)
-            mirror_v_toggle = ttk.Checkbutton(pantograph, text=_("Mirror every other row vertically"), variable=self.mirror_rows_v_var, command=self._on_mirror_rows_v_toggled)
-            mirror_v_toggle.grid(row=6, column=0, columnspan=2, sticky="w")
-
-            self.flip_h_var = tk.BooleanVar(value=self.flip_horizontal)
-            flip_h_toggle = ttk.Checkbutton(pantograph, text=_("Flip horizontally"), variable=self.flip_h_var, command=self._on_flip_h_toggled)
-            flip_h_toggle.grid(row=7, column=0, columnspan=2, sticky="w")
-
-            self.flip_v_var = tk.BooleanVar(value=self.flip_vertical)
-            flip_v_toggle = ttk.Checkbutton(pantograph, text=_("Flip vertically"), variable=self.flip_v_var, command=self._on_flip_v_toggled)
-            flip_v_toggle.grid(row=8, column=0, columnspan=2, sticky="w")
-
-            ttk.Label(sidebar, text=_("Export format")).grid(row=10, column=0, sticky="w", pady=(8, 0))
-            export_row = ttk.Frame(sidebar)
-            export_row.grid(row=11, column=0, sticky="ew")
-            export_row.columnconfigure(0, weight=1)
-
-            self.format_combo = ttk.Combobox(export_row, state="readonly")
-            self.format_combo["values"] = [f"{key} – {profile.title}" for key, profile in self.exporters.items()]
-            if self.format_combo["values"]:
-                self.format_combo.current(0)
-            self.format_combo.grid(row=0, column=0, sticky="ew")
-
-            self.export_layout_var = tk.BooleanVar(value=self.export_entire_layout)
-            export_layout_toggle = ttk.Checkbutton(export_row, text=_("Export entire layout"), variable=self.export_layout_var, command=self._on_export_layout_toggled)
-            export_layout_toggle.grid(row=0, column=1, sticky="w", padx=(6, 0))
-
-            export_button = ttk.Button(sidebar, text=_("Export…"), command=self._export)
-            export_button.grid(row=12, column=0, sticky="w", pady=(8, 0))
-
-            self.export_status = ttk.Label(sidebar, text="", width=50)
-            self.export_status.grid(row=13, column=0, sticky="w", pady=(2, 0))
-
-        def _toggle_play(self, *_args) -> None:
-            if (
-                not self.playing
-                and self.model.total_length_mm > 0
-                and math.isclose(self.progress_mm, self.model.total_length_mm, abs_tol=1e-6)
-            ):
-                self.progress_mm = 0.0
-                self._schedule_redraw()
-            self.playing = not self.playing
-            self.play_button.config(text=_("Pause") if self.playing else _("Play"))
-            self.last_tick = time.monotonic()
-
-        def _restart(self, *_args) -> None:
-            self.progress_mm = 0.0
-            self.playing = False
-            self.play_button.config(text=_("Play"))
-            self.last_tick = time.monotonic()
-            self._set_progress_slider_value(0.0)
-            self.preview_status.config(text=_("Preview reset. Press Play to start."))
-            if hasattr(self, "_edge_progress"):
-                self._edge_progress = {}
-            self._schedule_redraw()
-
-        def _optimize_path(self, *_args) -> None:
-            if not self.model.segments:
-                self.preview_status.config(text=_("No path to optimize."))
-                return
-            try:
-                optimized_segments = optimize_motion_segments(
-                    self.model.segments,
-                    start_point=self.model.start_point,
-                    end_point=self.model.end_point,
-                )
-            except Exception as exc:  # pragma: no cover - GUI feedback
-                self.preview_status.config(text=_("Optimization failed: ") + str(exc))
-                return
-
-            if optimized_segments is self.model.segments or optimized_segments == self.model.segments:
-                self.preview_status.config(text=_("Path is already optimised."))
-                return
-
-            self.model = MotionPathModel(
-                optimized_segments,
-                px_to_mm=self.model.px_to_mm,
-                doc_height_px=self.model.doc_height_px,
-            )
-            base_height_px = max(self.model.bounds[3] - self.model.bounds[1], 1e-3)
-            self.base_row_distance_mm = base_height_px * self.model.px_to_mm
-            self.row_distance_mm = self.base_row_distance_mm
-            self.row_distance_var.set(self.row_distance_mm)
-            self._refresh_y_warning()
-
-            self.progress_mm = 0.0
-            self.playing = False
-            self.play_button.config(text=_("Play"))
-            self.last_tick = time.monotonic()
-            self._schedule_redraw()
-            self.preview_status.config(text=_("Path optimised to reduce overlaps."))
-
-        def _on_speed_changed(self, *_args) -> None:
-            self.speed_multiplier = float(self.speed_var.get())
-            self.speed_value_label.config(text=f"{self.speed_multiplier:.2f}×")
-
-        def _on_repeat_changed(self) -> None:
-            self.repeat_count = max(1, int(self.repeat_var.get()))
-            self._schedule_redraw()
-
-        def _on_rows_changed(self) -> None:
-            self.row_count = max(1, int(self.rows_var.get()))
-            self._schedule_redraw()
-
-        def _on_row_distance_changed(self) -> None:
-            self.row_distance_mm = max(1.0, float(self.row_distance_var.get()))
-            self._schedule_redraw()
-
-        def _on_stagger_toggled(self) -> None:
-            self.stagger = bool(self.stagger_var.get())
-            self._schedule_redraw()
-
-        def _on_stagger_percent_changed(self, *_args) -> None:
-            self.stagger_percent = float(self.stagger_percent_var.get())
-            if self.stagger:
-                self._schedule_redraw()
-
-        def _on_export_layout_toggled(self) -> None:
-            self.export_entire_layout = bool(self.export_layout_var.get())
-
-        def _on_mirror_rows_toggled(self) -> None:
-            self.mirror_alternate_rows = bool(self.mirror_rows_var.get())
-            self._schedule_redraw()
-
-        def _on_mirror_rows_v_toggled(self) -> None:
-            self.mirror_alternate_rows_vertical = bool(self.mirror_rows_v_var.get())
-            self._schedule_redraw()
-
-        def _on_flip_h_toggled(self) -> None:
-            self.flip_horizontal = bool(self.flip_h_var.get())
-            self._schedule_redraw()
-
-        def _on_flip_v_toggled(self) -> None:
-            self.flip_vertical = bool(self.flip_v_var.get())
-            self._schedule_redraw()
-
-        def _export(self, *_args) -> None:
-            active = self.format_combo.current()
-            if active < 0:
-                return
-            format_key = list(self.exporters.keys())[active]
-            profile = self.exporters[format_key]
-
-            filename = filedialog.asksaveasfilename(
-                title=_("Export Motion Path"),
-                initialdir=str(Path.home()),
-                initialfile=f"quilt_path.{profile.extension}",
-                defaultextension=f".{profile.extension}",
-                filetypes=[(profile.title, f"*.{profile.extension}")],
-            )
-            if not filename:
-                return
-
-            out_path = Path(filename)
-            if out_path.suffix.lower() != f".{profile.extension.lower()}":
-                out_path = out_path.with_suffix(f".{profile.extension.lower()}")
-
-            try:
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-            except PermissionError:
-                self.export_status.config(text=_("No permission to create folder: ") + str(out_path.parent))
-                return
-            except FileExistsError:
-                pass
-
-            try:
-                export_model = self._build_export_model() if self.export_entire_layout else self.model
-                profile.writer(export_model, out_path)
-            except PermissionError:
-                self.export_status.config(
-                    text=_("Cannot write to {path}. Pick a folder inside your home directory.").format(
-                        path=str(out_path)
-                    )
-                )
-                return
-            except Exception as exc:  # pragma: no cover - GUI feedback
-                self.export_status.config(text=_("Export failed: ") + str(exc))
-                return
-
-            self.export_status.config(text=_("Exported to ") + str(out_path))
-            self._schedule_redraw()
-
-        def _on_destroy(self) -> None:
-            if self._tick_after_id is not None:
-                self.root.after_cancel(self._tick_after_id)
-                self._tick_after_id = None
-            self.root.destroy()
-
-        def _schedule_tick(self) -> None:
-            self._tick_after_id = self.root.after(16, self._tick)
-
-        def _tick(self) -> None:
-            if not self.playing or not self.model.edges:
-                self._schedule_tick()
-                return
-            now = time.monotonic()
-            if self.last_tick is None:
-                self.last_tick = now
-                self._schedule_tick()
-                return
-
-            delta = now - self.last_tick
-            self.last_tick = now
-
-            advance = delta * self.BASE_SPEED_MM_PER_SEC * self.speed_multiplier
-            self.progress_mm += advance
-            if self.progress_mm >= self.model.total_length_mm:
-                self.progress_mm = self.model.total_length_mm
-                self.playing = False
-                self.play_button.config(text=_("Play"))
-            self._schedule_redraw()
-            self._schedule_tick()
-
-        def _on_canvas_resize(self, *_args) -> None:
-            self._schedule_redraw()
-
-        def _schedule_redraw(self) -> None:
-            if self._redraw_pending:
-                return
-            self._redraw_pending = True
-            self.root.after_idle(self._redraw)
-
-        def _redraw(self) -> None:
-            self._redraw_pending = False
-            if not hasattr(self, "canvas"):
-                return
-            width = self.canvas.winfo_width()
-            height = self.canvas.winfo_height()
-            if width <= 1 or height <= 1:
-                return
-
-            self.canvas.delete("all")
-            self.canvas.create_rectangle(0, 0, width, height, fill="#f8f8f8", outline="")
-
-            if not self.model.edges:
-                self.preview_status.config(text=_("Select at least one path to preview."))
-                return
-
-            self._viewport = self._compute_viewport(width, height)
-            scale, offset_x, offset_y = self._viewport
-
-            self._draw_full_pattern(scale, offset_x, offset_y)
-            self._draw_progress(scale, offset_x, offset_y)
-
-            if self._y_mismatch and self.model.start_point is not None:
-                self._draw_warning_ring(self.model.start_point, scale, offset_x, offset_y)
-            if self._y_mismatch and self.model.end_point is not None:
-                self._draw_warning_ring(self.model.end_point, scale, offset_x, offset_y)
-
-            point, needle_down = self.model.point_at(self.progress_mm)
-            px = self._to_canvas(point, scale, offset_x, offset_y)
-            r = max(2.0, 4.0 * scale * 0.2)
-            color = "#e53935" if needle_down else "#f06292"
-            self.canvas.create_oval(px[0] - r, px[1] - r, px[0] + r, px[1] + r, fill=color, outline="")
-
-            stitched = min(self.progress_mm, self.model.total_length_mm)
-            percent = (stitched / self.model.total_length_mm * 100.0) if self.model.total_length_mm else 0.0
-            self._set_progress_slider_value(percent)
-            self.preview_status.config(
-                text=_("Path length: {length:.1f} mm   Previewed: {progress:.1f} mm ({pct:.1f}%)").format(
-                    length=self.model.total_length_mm, progress=stitched, pct=percent
-                )
-            )
-
-        def _set_progress_slider_value(self, percent: float) -> None:
-            self._updating_progress_slider = True
-            self.progress_var.set(max(0.0, min(100.0, percent)))
-            self._updating_progress_slider = False
-
-        def _on_progress_slider_changed(self, _value) -> None:
-            if self._updating_progress_slider or not self.model.total_length_mm:
-                return
-            percent = float(self.progress_var.get())
-            self.progress_mm = percent / 100.0 * self.model.total_length_mm
-            self.last_tick = time.monotonic()
-            self._schedule_redraw()
-
-        def _pantograph_offsets(self) -> List[Tuple[int, float, float]]:
-            width_px = max(self.model.bounds[2] - self.model.bounds[0], 1e-3)
-            height_px = max(self.model.bounds[3] - self.model.bounds[1], 1e-3)
-            self._pattern_width_px = width_px
-            self._pattern_height_px = height_px
-
-            return _compute_pantograph_offsets(
-                self.model.bounds,
-                repeat_count=self.repeat_count,
-                row_count=self.row_count,
-                row_distance_mm=self.row_distance_mm,
-                px_to_mm=self.model.px_to_mm,
-                stagger=self.stagger,
-                stagger_percent=self.stagger_percent,
-                start_point=self.model.start_point,
-                end_point=self.model.end_point,
-            )
-
-        def _transform_point(self, point: Point, mirror_row_h: bool, mirror_row_v: bool) -> Point:
-            min_x, min_y, max_x, max_y = self.model.bounds
-            cx = (min_x + max_x) / 2.0
-            cy = (min_y + max_y) / 2.0
-            x, y = point
-            if self.flip_horizontal or mirror_row_h:
-                x = 2 * cx - x
-            if self.flip_vertical or mirror_row_v:
-                y = 2 * cy - y
-            return (x, y)
-
-        def _pantograph_bounds(self) -> Tuple[float, float, float, float]:
-            min_x, min_y, max_x, max_y = self.model.bounds
-            offsets = self._pantograph_offsets()
-            total_min_x = float("inf")
-            total_min_y = float("inf")
-            total_max_x = float("-inf")
-            total_max_y = float("-inf")
-            for _row_idx, dx, dy in offsets:
-                total_min_x = min(total_min_x, min_x + dx)
-                total_min_y = min(total_min_y, min_y + dy)
-                total_max_x = max(total_max_x, max_x + dx)
-                total_max_y = max(total_max_y, max_y + dy)
-            if not offsets:
-                total_min_x, total_min_y, total_max_x, total_max_y = min_x, min_y, max_x, max_y
-            return (total_min_x, total_min_y, total_max_x, total_max_y)
-
-        def _layout_bounds(self) -> Tuple[float, float, float, float]:
-            return _compute_layout_bounds(
-                self.model.bounds,
-                repeat_count=self.repeat_count,
-                row_count=self.row_count,
-                row_distance_mm=self.row_distance_mm,
-                px_to_mm=self.model.px_to_mm,
-                start_point=self.model.start_point,
-                end_point=self.model.end_point,
-            )
-
-        def _build_export_model(self) -> MotionPathModel:
-            """Return a MotionPathModel representing the full layout."""
-            layout_bounds = self._layout_bounds()
-            raw_offsets = self._pantograph_offsets()
-            offsets_by_row: Dict[int, List[Tuple[float, float]]] = {}
-            for row_idx, dx, dy in raw_offsets:
-                offsets_by_row.setdefault(row_idx, []).append((dx, dy))
-            offsets: List[Tuple[int, float, float]] = []
-            for row_idx in sorted(offsets_by_row.keys()):
-                entries = sorted(offsets_by_row[row_idx], key=lambda v: v[0])
-                if row_idx % 2 == 1:
-                    entries.reverse()
-                for dx, dy in entries:
-                    offsets.append((row_idx, dx, dy))
-
-            stitched_segments: List[MotionSegment] = []
-            last_end: Optional[Point] = None
-
-            def _close_enough(a: Point, b: Point, tol: float = 1e-6) -> bool:
-                return math.isclose(a[0], b[0], abs_tol=tol) and math.isclose(a[1], b[1], abs_tol=tol)
-
-            def _clip_segment(p0: Point, p1: Point) -> Optional[Tuple[Point, Point]]:
-                min_x, min_y, max_x, max_y = layout_bounds
-                dx = p1[0] - p0[0]
-                dy = p1[1] - p0[1]
-                u1, u2 = 0.0, 1.0
-
-                def _update(p: float, q: float) -> bool:
-                    nonlocal u1, u2
-                    if math.isclose(p, 0.0, abs_tol=1e-12):
-                        return q >= 0.0
-                    t = q / p
-                    if p < 0:
-                        if t > u2:
-                            return False
-                        if t > u1:
-                            u1 = t
-                    else:
-                        if t < u1:
-                            return False
-                        if t < u2:
-                            u2 = t
-                    return True
-
-                if not (
-                    _update(-dx, p0[0] - min_x)
-                    and _update(dx, max_x - p0[0])
-                    and _update(-dy, p0[1] - min_y)
-                    and _update(dy, max_y - p0[1])
-                ):
-                    return None
-                clipped_start = (p0[0] + u1 * dx, p0[1] + u1 * dy)
-                clipped_end = (p0[0] + u2 * dx, p0[1] + u2 * dy)
-                return clipped_start, clipped_end
-
-            def _clip_polyline(points: List[Point]) -> List[Point]:
-                clipped: List[Point] = []
-                for idx in range(1, len(points)):
-                    result = _clip_segment(points[idx - 1], points[idx])
-                    if result is None:
-                        continue
-                    a, b = result
-                    if not clipped:
-                        clipped.append(a)
-                    else:
-                        if not _close_enough(clipped[-1], a):
-                            clipped.append(a)
-                    clipped.append(b)
-                return clipped
-
-            for row_idx, dx, dy in offsets:
-                mirror_row_h = (row_idx % 2 == 1) or (self.mirror_alternate_rows and (row_idx % 2 == 1))
-                mirror_row_v = self.mirror_alternate_rows_vertical and (row_idx % 2 == 1)
-                for seg in self.model.segments:
-                    pts: List[Point] = []
-                    for pt in seg.points:
-                        tx, ty = self._transform_point(pt, mirror_row_h, mirror_row_v)
-                        pts.append((tx + dx, ty + dy))
-                    if len(pts) < 2:
-                        continue
-                    pts = _clip_polyline(pts)
-                    if len(pts) < 2:
-                        continue
-                    if last_end is not None and not _close_enough(last_end, pts[0]):
-                        stitched_segments.append(MotionSegment(points=[last_end, pts[0]], needle_down=True))
-                    stitched_segments.append(MotionSegment(points=pts, needle_down=seg.needle_down))
-                    last_end = pts[-1]
-
-            if not stitched_segments:
-                return self.model
-
-            return MotionPathModel(
-                stitched_segments,
-                px_to_mm=self.model.px_to_mm,
-                doc_height_px=self.model.doc_height_px,
-            )
-
-        def _stroke_width(self) -> float:
-            span = max(
-                self.model.bounds[2] - self.model.bounds[0],
-                self.model.bounds[3] - self.model.bounds[1],
-            )
-            if span <= 0:
-                return 1.0
-            width = (span / 300.0) ** 0.7
-            return max(min(width, 10.0), 0.08)
-
-        def _compute_viewport(self, width: int, height: int) -> Tuple[float, float, float]:
-            min_x, min_y, max_x, max_y = self._layout_bounds()
-            margin = 0.05
-            span_x = max(max_x - min_x, 1e-3)
-            span_y = max(max_y - min_y, 1e-3)
-            scale_x = width * (1.0 - margin) / span_x
-            scale_y = height * (1.0 - margin) / span_y
-            scale = min(scale_x, scale_y)
-            offset_x = (width - span_x * scale) / 2.0 - min_x * scale
-            offset_y = (height - span_y * scale) / 2.0 - min_y * scale
-            return scale, offset_x, offset_y
-
-        def _to_canvas(self, point: Point, scale: float, offset_x: float, offset_y: float) -> Point:
-            return (point[0] * scale + offset_x, point[1] * scale + offset_y)
-
-        def _draw_full_pattern(self, scale: float, offset_x: float, offset_y: float) -> None:
-            line_width = max(1.0, self._stroke_width() * scale)
-            offsets = self._pantograph_offsets()
-
-            for row_idx, dx, dy in offsets:
-                mirror_row_h = self.mirror_alternate_rows and (row_idx % 2 == 1)
-                mirror_row_v = self.mirror_alternate_rows_vertical and (row_idx % 2 == 1)
-                for seg in self.model.segments:
-                    color = "#2b6cb0" if seg.needle_down else "#d14343"
-                    pts = [self._transform_point(pt, mirror_row_h, mirror_row_v) for pt in seg.points]
-                    pts = [(p[0] + dx, p[1] + dy) for p in pts]
-                    if len(pts) < 2:
-                        continue
-                    coords = []
-                    for pt in pts:
-                        cx, cy = self._to_canvas(pt, scale, offset_x, offset_y)
-                        coords.extend([cx, cy])
-                    self.canvas.create_line(*coords, fill=color, width=line_width)
-
-        def _rgba_to_hex(self, rgba: Tuple[float, float, float, float]) -> str:
-            r, g, b, _a = rgba
-            return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
-
-        def _draw_progress(self, scale: float, offset_x: float, offset_y: float) -> None:
-            line_width = max(1.0, self._stroke_width() * 1.8 * scale)
-            remaining = self.progress_mm
-            transform = lambda p: self._transform_point(p, False, False)
-
-            cell_size = max(self._stroke_width() * 0.01, 1e-6)
-            coverage: Dict[Tuple[int, int], int] = {}
-
-            def _sample_cells(p0: Point, p1: Point) -> List[Tuple[int, int]]:
-                length = math.dist(p0, p1)
-                if length <= 1e-12:
-                    gx = int(round(p0[0] / cell_size))
-                    gy = int(round(p0[1] / cell_size))
-                    return [(gx, gy)]
-                steps = max(1, int(math.ceil(length / cell_size)))
-                coords: List[Tuple[int, int]] = []
-                for s in range(steps + 1):
-                    t = s / steps
-                    x = p0[0] + (p1[0] - p0[0]) * t
-                    y = p0[1] + (p1[1] - p0[1]) * t
-                    gx = int(round(x / cell_size))
-                    gy = int(round(y / cell_size))
-                    if not coords or coords[-1] != (gx, gy):
-                        coords.append((gx, gy))
-                return coords
-
-            def _subdivide_and_draw(edge: MotionEdge) -> bool:
-                if remaining <= edge.start_length_mm:
-                    return True
-                length_remaining = min(remaining - edge.start_length_mm, edge.length_mm)
-                if length_remaining <= 0:
-                    return True
-
-                chunks = max(1, min(12, int(math.ceil(edge.length_mm / max(edge.length_mm / 5.0, 1e-6)))))
-                chunk_len = edge.length_mm / chunks if chunks else edge.length_mm
-
-                edge_cells: List[Tuple[int, int]] = []
-
-                for i in range(chunks):
-                    seg_start_mm = i * chunk_len
-                    seg_draw_mm = min(chunk_len, max(0.0, length_remaining - seg_start_mm))
-                    if seg_draw_mm <= 0:
-                        continue
-                    t0 = (seg_start_mm) / edge.length_mm if edge.length_mm else 0.0
-                    t1 = (seg_start_mm + seg_draw_mm) / edge.length_mm if edge.length_mm else 0.0
-                    t0 = max(0.0, min(1.0, t0))
-                    t1 = max(0.0, min(1.0, t1))
-                    seg_start = (
-                        edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * t0,
-                        edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * t0,
-                    )
-                    seg_end = (
-                        edge.start_px[0] + (edge.end_px[0] - edge.start_px[0]) * t1,
-                        edge.start_px[1] + (edge.end_px[1] - edge.start_px[1]) * t1,
-                    )
-
-                    draw_start = transform(seg_start)
-                    draw_end = transform(seg_end)
-
-                    cells = _sample_cells(draw_start, draw_end)
-                    if cells:
-                        overlap_hits = [coverage.get(c, 0) for c in cells]
-                        covered = [v for v in overlap_hits if v > 0]
-                        threshold = max(1, int(len(cells) * 0.05))
-                        if len(covered) >= threshold:
-                            passes_completed = max(covered)
-                        else:
-                            passes_completed = 0
-                    else:
-                        passes_completed = 0
-
-                    color = self._rgba_to_hex(_color_for_pass(passes_completed, edge.needle_down))
-                    start_px = self._to_canvas(draw_start, scale, offset_x, offset_y)
-                    end_px = self._to_canvas(draw_end, scale, offset_x, offset_y)
-                    self.canvas.create_line(*start_px, *end_px, fill=color, width=line_width)
-
-                    edge_cells.extend(cells)
-
-                    if seg_draw_mm + seg_start_mm + 1e-9 < length_remaining:
-                        continue
-                    if length_remaining + 1e-9 < edge.length_mm:
-                        for cell in edge_cells:
-                            coverage[cell] = coverage.get(cell, 0) + 1
-                        return False
-
-                for cell in edge_cells:
-                    coverage[cell] = coverage.get(cell, 0) + 1
-
-                return True
-
-            for edge in self.model.edges:
-                if not _subdivide_and_draw(edge):
-                    break
-
-        def _draw_warning_ring(self, point: Point, scale: float, offset_x: float, offset_y: float) -> None:
-            px = self._to_canvas(point, scale, offset_x, offset_y)
-            r = max(6.0, 9.0 * scale * 0.2)
-            self.canvas.create_oval(
-                px[0] - r,
-                px[1] - r,
-                px[0] + r,
-                px[1] + r,
-                outline="#b8860b",
-                width=max(1.0, 2.0 * scale * 0.5),
-            )
-
-        def _refresh_y_warning(self) -> None:
-            start = self.model.start_point
-            end = self.model.end_point
-            delta_mm = 0.0
-            mismatch = False
-            if start is not None and end is not None:
-                delta_mm = abs(start[1] - end[1]) * self.model.px_to_mm
-                mismatch = delta_mm > 0.1 + 1e-9
-            self._y_mismatch = mismatch
-            if mismatch:
-                message = _(
-                    "WARNING: Start node and end node have different Y-axis positions (dY = {delta:.3f} mm > 0.1mm)"
-                ).format(delta=delta_mm)
-                self.y_warning_label.config(text=message)
-            else:
-                self.y_warning_label.config(text="")
-else:
-    class QuiltPreviewWindow:  # pragma: no cover - placeholder when Tk missing
-        pass
-
-
 # Export writers -------------------------------------------------------------
 def _write_dxf(model: MotionPathModel, outfile: Path) -> None:
     def section(lines: List[str]) -> List[str]:
@@ -1807,16 +1058,51 @@ if PIL_AVAILABLE:
     )
 
 
+def _preview_payload(
+    segments: List[MotionSegment],
+    px_to_mm: float,
+    doc_height_px: Optional[float],
+) -> Dict[str, object]:
+    return {
+        "px_to_mm": px_to_mm,
+        "doc_height_px": doc_height_px,
+        "segments": [
+            {"needle_down": seg.needle_down, "points": [list(pt) for pt in seg.points]}
+            for seg in segments
+        ],
+    }
+
+
+def _find_preview_python() -> str:
+    override = os.environ.get("QUILT_PREVIEW_PYTHON")
+    if override:
+        return override
+    return shutil.which("python3") or shutil.which("python") or sys.executable
+
+
+def _launch_preview_app(payload: Dict[str, object]) -> None:
+    preview_script = _EXTENSION_DIR / "quilt_motion_preview_app.py"
+    if not preview_script.exists():
+        raise FileNotFoundError(f"Preview app not found: {preview_script}")
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as handle:
+        json.dump(payload, handle)
+        temp_path = handle.name
+
+    python_exe = _find_preview_python()
+    process = subprocess.Popen(
+        [python_exe, str(preview_script), "--input", temp_path, "--delete-input"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    threading.Thread(target=process.wait, daemon=True).start()
+
+
 class QuiltMotionExportExtension(inkex.EffectExtension):
     """Entry point for Inkscape."""
 
     def effect(self) -> None:  # pragma: no cover - Inkscape runtime
-        if not TK_AVAILABLE:
-            detail = _("Tkinter is required for the preview UI.")
-            if TK_LOAD_ERROR:
-                detail = f"{detail}\n{TK_LOAD_ERROR}"
-            raise inkex.AbortExtension(detail)
-
         selection = self.svg.selection.filter(PathElement)
         if not selection:
             raise inkex.AbortExtension(_("Please select at least one path."))
@@ -1857,8 +1143,11 @@ class QuiltMotionExportExtension(inkex.EffectExtension):
             doc_height_px = None
 
         model = MotionPathModel(ordered_segments, px_to_mm=px_to_mm, doc_height_px=doc_height_px)
-        window = QuiltPreviewWindow(model, EXPORT_PROFILES)
-        window.present()
+        payload = _preview_payload(model.segments, px_to_mm, doc_height_px)
+        try:
+            _launch_preview_app(payload)
+        except Exception as exc:
+            raise inkex.AbortExtension(_("Failed to launch preview app: ") + str(exc))
 
 
 if __name__ == "__main__":  # pragma: no cover

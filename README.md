@@ -17,8 +17,8 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 ### Installer (recommended)
 
 1. **Download** this repository (clone or unzip).
-2. **Run the installer** (it installs Python deps into a sidecar folder, so it
-   does not need Inkscape’s bundled Python):
+2. **Run the installer** (it installs Python deps into a sidecar folder and
+   launches a standalone preview app using your system Python):
 
    ```bash
    python3 install_extension.py
@@ -27,7 +27,8 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
    You can override the install target with `--dest` or `INKSCAPE_EXTENSION_DIR`,
    and control pip installs with `--python`, `--libs-dir`, or `--skip-pip`.
    Dependencies are installed into `quilt_motion_exporter_libs` alongside the
-   extension, and the extension loads them at runtime.
+   extension, and the preview app loads them at runtime. To force a specific
+   Python for the preview app, set `QUILT_PREVIEW_PYTHON`.
 
 3. **Restart** Inkscape and find the extension under
    `Extensions → Quilting → Quilt Motion Preview & Export`.
@@ -45,17 +46,17 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 
    Create the directory if it does not exist, then restart Inkscape.
 
-3. **Ensure Tkinter is available** for Python (standard library UI toolkit):
+3. **Ensure PySide6 is available** for the standalone preview UI:
 
    - **Linux (Apt)**:
 
      ```bash
-     sudo apt install python3-tk
+     python3 -m pip install PySide6
      ```
 
-   - **Linux (other distros)**: install the `tk`/`python3-tk` package via your package manager.
+   - **Linux (other distros)**: install PySide6 via your Python package manager.
 
-   - **Windows/macOS**: Tkinter is bundled with the official Python builds that ship with Inkscape.
+   - **Windows/macOS**: the installer will fetch PySide6 into the sidecar folder.
 
 4. Start Inkscape and find the extension under `Extensions → Quilting → Quilt Motion Preview & Export`.
 
@@ -82,7 +83,7 @@ When running Inkscape from the Snap store, extensions may only write inside your
 
 ## Implementation notes
 
-- The preview window is built with Tkinter, which ships with standard Python builds.
+- The preview window is a standalone PySide6 application launched from the extension.
 - Paths are flattened via Inkscape’s `CubicSuperPath` utilities to keep Bézier curves accurate. Each sub‑path becomes a stitch segment, and travel jumps are inserted between disconnected components so long-arm controllers can raise the needle when necessary.
 - Exporters live in `extensions/quilt_motion_exporter.py`. Each format is represented by a small writer function that receives the normalized motion model—adding more formats is as simple as registering another `ExportProfile`.
 - Pantograph repeats are rendered purely in the preview: we offset each instance by the actual delta between its start and end nodes, optionally staggering alternate rows so you can audition complex layouts without duplicating geometry inside the SVG.
@@ -95,11 +96,11 @@ Automated verification lives under `tests/` and exercises the motion path model 
 python3 -m unittest discover -s tests
 ```
 
-For quick smoke tests of the GTK entry point, you can also run:
+For quick smoke tests of the preview app entry point, you can also run:
 
 ```bash
 cd extensions
-python3 quilt_motion_exporter.py --help
+python3 quilt_motion_preview_app.py --help
 ```
 
 Inside Inkscape, keep the XML editor open to inspect the produced files if you need to adjust scaling or tolerances. When modifying the preview, `journalctl -f` (on Linux) is helpful for catching Python tracebacks emitted by Inkscape.
