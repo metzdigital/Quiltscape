@@ -14,26 +14,50 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
 
 ## Installation
 
-### Installer (recommended)
+### macOS
 
 1. **Download** this repository (clone or unzip).
-2. **Run the installer** (it installs Python deps into a sidecar folder and
-   launches a standalone preview app using your system Python):
+2. **Run the installer** with your system Python:
 
    ```bash
    python3 install_extension.py
    ```
 
-   You can override the install target with `--dest` or `INKSCAPE_EXTENSION_DIR`,
-   and control pip installs with `--python`, `--libs-dir`, or `--skip-pip`.
-   Dependencies are installed into `quilt_motion_exporter_libs` alongside the
-   extension, and the preview app loads them at runtime. To force a specific
-   Python for the preview app, set `QUILT_PREVIEW_PYTHON`.
+3. **Restart** Inkscape and open `Extensions → Quilting → Quilt Motion Preview & Export`.
 
-3. **Restart** Inkscape and find the extension under
-   `Extensions → Quilting → Quilt Motion Preview & Export`.
+Notes:
+- The installer places dependencies in `quilt_motion_exporter_libs` next to the extension.
+- The preview app uses the same Python used during install (saved in `quilt_motion_preview_python.txt`).
 
-### Manual install
+### Windows
+
+1. **Download** this repository (clone or unzip).
+2. **Run the installer** from PowerShell:
+
+   ```powershell
+   py -3 install_extension.py
+   ```
+
+3. **Restart** Inkscape and open `Extensions → Quilting → Quilt Motion Preview & Export`.
+
+### Linux
+
+1. **Download** this repository (clone or unzip).
+2. **Run the installer**:
+
+   ```bash
+   python3 install_extension.py
+   ```
+
+3. **Restart** Inkscape and open `Extensions → Quilting → Quilt Motion Preview & Export`.
+
+If your distro does not ship PySide6 wheels for your Python, install it via your package manager or run:
+
+```bash
+python3 -m pip install PySide6
+```
+
+### Manual install (all OSes)
 
 1. **Download** this repository (clone or unzip).
 2. **Copy** the `extensions/` and `README.md` contents into your Inkscape user extensions folder:
@@ -44,21 +68,13 @@ An Inkscape extension that turns any vector path into a long‑arm quilting moti
    | Windows  | `%APPDATA%\Inkscape\extensions` (e.g., `C:\Users\<you>\AppData\Roaming\Inkscape\extensions`) |
    | macOS    | `~/Library/Application Support/org.inkscape.Inkscape/config/inkscape/extensions` |
 
-   Create the directory if it does not exist, then restart Inkscape.
+3. **Install dependencies** into the sidecar folder:
 
-3. **Ensure PySide6 is available** for the standalone preview UI:
+   ```bash
+   python3 -m pip install -r requirements.txt --target /path/to/inkscape/extensions/quilt_motion_exporter_libs
+   ```
 
-   - **Linux (Apt)**:
-
-     ```bash
-     python3 -m pip install PySide6
-     ```
-
-   - **Linux (other distros)**: install PySide6 via your Python package manager.
-
-   - **Windows/macOS**: the installer will fetch PySide6 into the sidecar folder.
-
-4. Start Inkscape and find the extension under `Extensions → Quilting → Quilt Motion Preview & Export`.
+4. **Restart** Inkscape and open `Extensions → Quilting → Quilt Motion Preview & Export`.
 
 ## Usage
 
