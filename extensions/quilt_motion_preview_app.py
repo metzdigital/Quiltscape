@@ -268,9 +268,15 @@ class PreviewController(QtCore.QObject):
             return clipped
 
         for row_idx, dx, dy in offsets:
-            mirror_row_h = (row_idx % 2 == 1) or (self.mirror_alternate_rows and (row_idx % 2 == 1))
+            mirror_row_h = self.mirror_alternate_rows and (row_idx % 2 == 1)
             mirror_row_v = self.mirror_alternate_rows_vertical and (row_idx % 2 == 1)
-            for seg in self.model.segments:
+            segments = self.model.segments
+            if row_idx % 2 == 1:
+                segments = [
+                    qmc.MotionSegment(points=list(reversed(seg.points)), needle_down=seg.needle_down)
+                    for seg in reversed(self.model.segments)
+                ]
+            for seg in segments:
                 pts: List[Point] = []
                 for pt in seg.points:
                     tx, ty = self._transform_point(pt, mirror_row_h, mirror_row_v)
