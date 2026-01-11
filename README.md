@@ -1,5 +1,6 @@
 # Quilt Motion Preview & Export
-<img width="450" height="385" alt="Image" src="https://github.com/user-attachments/assets/25fafbe2-b2c5-4f67-9050-1a88f60c06cc" /><img width="500" height="385" alt="Image" src="https://github.com/user-attachments/assets/aa5bd6b5-5db5-4363-adbd-42ae2fea4126" />
+<img width="550" height="385" alt="Image" src="https://github.com/user-attachments/assets/25fafbe2-b2c5-4f67-9050-1a88f60c06cc" />
+<img width="1156" height="767" alt="Image" src="https://github.com/user-attachments/assets/aa5bd6b5-5db5-4363-adbd-42ae2fea4126" />
 
 
 An Inkscape extension that turns any vector path into a long‑arm quilting motion path. It lets you:
