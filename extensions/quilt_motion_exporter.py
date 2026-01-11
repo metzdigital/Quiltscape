@@ -216,19 +216,20 @@ def _compute_pantograph_offsets(
     offsets: List[Tuple[int, float, float]] = []
     target_min_x = min_x
     target_max_x = max_x + (repeat_count - 1) * delta_x
+    start_x = start_point[0] if start_point is not None else min_x
+    end_x = end_point[0] if end_point is not None else max_x
     for row in range(row_count):
         base_dx = stagger_px if (stagger and row % 2 == 1) else 0.0
         row_dy = row * row_spacing_px
         row_dx: List[float] = [base_dx + repeat * delta_x for repeat in range(repeat_count)]
         row_dx.sort()
         if row_dx:
-            while min_x + row_dx[0] > target_min_x + 1e-6:
+            while start_x + row_dx[0] > target_min_x + 1e-6:
                 row_dx.insert(0, row_dx[0] - delta_x)
-            while max_x + row_dx[-1] < target_max_x - 1e-6:
+            while end_x + row_dx[-1] < target_max_x - 1e-6:
                 row_dx.append(row_dx[-1] + delta_x)
         for dx in row_dx:
-            dy = row_dy + (dx - base_dx) / delta_x * delta_y if delta_x else row_dy
-            offsets.append((row, dx, dy))
+            offsets.append((row, dx, row_dy))
     return offsets
 
 
@@ -260,7 +261,7 @@ def _compute_layout_bounds(
         row_dy = row * row_spacing_px
         for repeat in range(repeat_count):
             dx = repeat * delta_x
-            dy = row_dy + repeat * delta_y
+            dy = row_dy
             offsets.append((dx, dy))
 
     if not offsets:
